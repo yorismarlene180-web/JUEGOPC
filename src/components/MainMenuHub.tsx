@@ -246,15 +246,15 @@ export const MainMenuHub: React.FC<MainMenuHubProps> = ({
               </div>
 
               <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                {/* Offline Bots Card */}
+                {/* Solo Arena Bots (Online-Synced) Card */}
                 <div className="rounded-xl bg-[#0b0f17]/95 border border-slate-800 p-6 flex flex-col justify-between">
                   <div>
                     <div className="flex items-center justify-between mb-2">
-                      <h2 className="font-display text-xl font-bold text-white">Modo Offline (Bots)</h2>
+                      <h2 className="font-display text-xl font-bold text-white">Arena Individual (Bots)</h2>
                       <Crosshair className="w-5 h-5 text-amber-400" />
                     </div>
                     <p className="text-sm text-slate-400 mb-5">
-                      Combate sin conexión contra 5 bots tácticos en el mapa Campo de Pruebas 3D. Ideal para entrenar puntería y ganar recompensas.
+                      Combate en línea todos contra todos frente a 5 bots tácticos que también se enfrentan entre sí y lanzan granadas. Suma puntos reales a tu ranking y clan.
                     </p>
 
                     <div className="mb-5">
@@ -284,7 +284,7 @@ export const MainMenuHub: React.FC<MainMenuHubProps> = ({
                     className="w-full flex items-center justify-center gap-2 py-3 rounded-lg bg-amber-500 hover:bg-amber-400 text-slate-950 font-display font-bold text-sm cursor-pointer transition-colors"
                   >
                     <Play className="w-4 h-4 fill-current" />
-                    Iniciar Partida Offline
+                    Jugar Arena con Bots
                   </button>
                 </div>
 

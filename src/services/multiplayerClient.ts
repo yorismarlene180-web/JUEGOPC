@@ -36,9 +36,10 @@ export type ServerEvent =
   | { type: 'player:left'; playerId: string }
   | { type: 'player:moved'; playerId: string; x: number; y: number; z: number; yaw: number; pitch: number }
   | { type: 'player:fired'; playerId: string; origin: [number, number, number]; hitPoint: [number, number, number]; tracer: string }
-  | { type: 'player:damaged'; targetId: string; attackerId: string; hp: number; headshot: boolean }
+  | { type: 'player:damaged'; targetId: string; attackerId: string; hp: number; headshot: boolean; explosive?: boolean }
   | { type: 'player:killed'; killerId: string; killerName: string; victimId: string; victimName: string; headshot: boolean }
   | { type: 'player:respawned'; playerId: string; x: number; y: number; z: number }
+  | { type: 'grenade:thrown'; ownerId: string; ownerName: string; origin: [number, number, number]; velocity: [number, number, number] }
   | { type: 'match:ended'; winnerName: string }
   | { type: 'chat:message'; message: ChatMessage }
   | { type: 'voice:speaking'; playerId: string; speaking: boolean }
@@ -140,6 +141,14 @@ export class MultiplayerClient {
 
   public sendHit(targetId: string, headshot: boolean) {
     this.send({ type: 'player:hit', targetId, headshot });
+  }
+
+  public sendGrenadeThrow(origin: [number, number, number], velocity: [number, number, number]) {
+    this.send({ type: 'grenade:throw', origin, velocity });
+  }
+
+  public sendGrenadeDamage(targetId: string, damage: number) {
+    this.send({ type: 'grenade:damage', targetId, damage });
   }
 
   public sendSpeaking(speaking: boolean) {

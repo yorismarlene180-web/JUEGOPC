@@ -1,7 +1,11 @@
 import * as THREE from 'three';
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
-import { getShopItem } from '../data/catalog';
+import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
+import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
+import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+import { ShaderPass } from 'three/addons/postprocessing/ShaderPass.js';
 import { soundEngine } from '../audio/soundEngine';
+import { getShopItem } from '../data/catalog';
 import type { AvatarLoadout, KillFeedEvent, MatchSummary, RoomPlayerState } from '../types/game';
 import { buildTacticalArena, getGroundHeightAt, resolveObstacleCollision, type ArenaData } from './ArenaBuilder';
 import { buildFirstPersonWeapon, buildOperatorAvatar, type CharacterRig, type FirstPersonWeaponRig } from './AvatarBuilder';
@@ -14,6 +18,8 @@ export interface HudSnapshot {
   ammo: number;
   maxAmmo: number;
   reserveAmmo: number;
+  grenades: number;
+  maxGrenades: number;
   reloading: boolean;
   reloadProgress: number;
   stamina: number;
@@ -25,6 +31,8 @@ export interface HudSnapshot {
   killTarget: number;
   hitmarker: 'none' | 'body' | 'head';
   damageFlash: number;
+  lowHealthIntensity: number;
+  grenadeShockIntensity: number;
   crosshairSpread: number;
   pointerLocked: boolean;
   alive: boolean;
@@ -59,6 +67,7 @@ interface BotActor {
   score: number;
   patrolTarget: THREE.Vector3;
   fireCooldown: number;
+  grenadeCooldown: number;
   windupTimer: number;
   hitFlashTimer: number;
   strafeDir: number;
@@ -72,6 +81,24 @@ interface RemoteActor {
   targetPos: THREE.Vector3;
   targetYaw: number;
   hitFlashTimer: number;
+}
+
+interface ActiveGrenade {
+  group: THREE.Group;
+  ledMat: THREE.MeshBasicMaterial;
+  pos: THREE.Vector3;
+  vel: THREE.Vector3;
+  fuse: number;
+  ownerId: string;
+  ownerName: string;
+  isLocalOwner: boolean;
+}
+
+interface ExplosionWave {
+  mesh: THREE.Mesh;
+  mat: THREE.MeshBasicMaterial;
+  life: number;
+  maxLife: number;
 }
 
 interface TracerBeam {
@@ -96,7 +123,69 @@ export interface EngineCallbacks {
   onMultiplayerMove?: (x: number, y: number, z: number, yaw: number, pitch: number) => void;
   onMultiplayerShoot?: (origin: [number, number, number], hitPoint: [number, number, number]) => void;
   onMultiplayerHit?: (targetId: string, headshot: boolean) => void;
+  onMultiplayerGrenadeThrow?: (origin: [number, number, number], velocity: [number, number, number]) => void;
+  onMultiplayerGrenadeDamage?: (targetId: string, damage: number) => void;
 }
+
+const CombatPostProcessShader = {
+  uniforms: {
+    tDiffuse: { value: null },
+    time: { value: 0 },
+    lowHealth: { value: 0 },
+    grenadeShock: { value: 0 },
+  },
+  vertexShader: `
+    varying vec2 vUv;
+    void main() {
+      vUv = uv;
+      gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+    }
+  `,
+  fragmentShader: `
+    uniform sampler2D tDiffuse;
+    uniform float time;
+    uniform float lowHealth;
+    uniform float grenadeShock;
+    varying vec2 vUv;
+
+    void main() {
+      vec2 uv = vUv;
+      vec2 centered = uv - 0.5;
+      float dist = length(centered);
+
+      // Frag grenade shockwave ripple + concussion chromatic aberration
+      if (grenadeShock > 0.005) {
+        float wave = sin(dist * 28.0 - time * 20.0) * 0.016 * grenadeShock;
+        vec2 dir = dist > 0.0001 ? centered / dist : vec2(0.0);
+        uv += dir * wave;
+        uv.x += sin(uv.y * 42.0 + time * 30.0) * 0.007 * grenadeShock;
+      }
+
+      float chroma = grenadeShock * 0.014;
+      vec4 baseSample = texture2D(tDiffuse, clamp(uv, 0.001, 0.999));
+      float r = texture2D(tDiffuse, clamp(uv + centered * chroma, 0.001, 0.999)).r;
+      float b = texture2D(tDiffuse, clamp(uv - centered * chroma, 0.001, 0.999)).b;
+      vec3 color = mix(baseSample.rgb, vec3(r, baseSample.g, b), step(0.001, grenadeShock));
+
+      // Low-health crimson vignette with gentle tactical pulse
+      if (lowHealth > 0.01) {
+        float pulse = 0.85 + 0.15 * sin(time * 5.2);
+        float vig = smoothstep(0.28, 0.82, dist) * lowHealth * pulse;
+        float luma = dot(color, vec3(0.299, 0.587, 0.114));
+        color = mix(color, vec3(luma), vig * 0.35);
+        color = mix(color, vec3(0.55, 0.03, 0.04), vig * 0.65);
+      }
+
+      // Concussion white/amber flash edge during grenade blast
+      if (grenadeShock > 0.01) {
+        float flash = grenadeShock * 0.22 * (1.0 - smoothstep(0.0, 0.8, dist));
+        color += vec3(1.0, 0.72, 0.45) * flash;
+      }
+
+      gl_FragColor = vec4(color, baseSample.a);
+    }
+  `,
+};
 
 // Pre-allocated math helpers outside render loop (zero GC)
 const _vec3 = new THREE.Vector3();
@@ -137,6 +226,8 @@ const BOT_PROFILES: Array<{ name: string; clanTag: string; loadout: AvatarLoadou
 export class BattlePlayersEngine {
   private container: HTMLElement;
   private renderer: THREE.WebGLRenderer;
+  private composer: EffectComposer | null = null;
+  private combatPass: ShaderPass | null = null;
   private scene: THREE.Scene;
   private camera: THREE.PerspectiveCamera;
   private arena: ArenaData;
@@ -149,6 +240,7 @@ export class BattlePlayersEngine {
   private viewMode: EngineViewMode = 'title';
   private paused = false;
   private chatOpen = false;
+  private isTouchDevice = false;
 
   // Player state
   private playerId = 'local';
@@ -167,11 +259,14 @@ export class BattlePlayersEngine {
   private respawnTimer = 0;
   private stamina = 100;
 
-  // Weapon state
+  // Weapon & Grenade state
   private fpWeapon: FirstPersonWeaponRig | null = null;
   private ammo = 30;
   private maxAmmo = 30;
   private reserveAmmo = 150;
+  private grenades = 2;
+  private maxGrenades = 2;
+  private grenadeThrowCooldown = 0;
   private reloading = false;
   private reloadTimer = 0;
   private reloadDuration = 1.15;
@@ -184,10 +279,12 @@ export class BattlePlayersEngine {
   private hitmarkerState: 'none' | 'body' | 'head' = 'none';
   private hitmarkerTimer = 0;
   private damageFlash = 0;
+  private lowHealthIntensity = 0;
+  private grenadeShockIntensity = 0;
 
   // Match stats
-  private matchMode: 'offline' | 'multiplayer' = 'offline';
-  private roomCode = 'OFFLINE';
+  private matchMode: 'solo' | 'multiplayer' = 'solo';
+  private roomCode = 'ARENA-BOTS';
   private difficulty: BotDifficulty = 'veterano';
   private kills = 0;
   private deaths = 0;
@@ -209,10 +306,20 @@ export class BattlePlayersEngine {
   private lastDragX = 0;
   private lastDragY = 0;
 
-  // Bots & Multiplayer Remote Players
+  // Bots, Remote Players & Grenades
   private bots: BotActor[] = [];
   private remotePlayers = new Map<string, RemoteActor>();
+  private activeGrenades: ActiveGrenade[] = [];
+  private explosionWaves: ExplosionWave[] = [];
   private raycaster = new THREE.Raycaster();
+
+  // Shared grenade geometries
+  private grenadeBodyGeo = new THREE.SphereGeometry(0.11, 10, 8);
+  private grenadeCapGeo = new THREE.CylinderGeometry(0.04, 0.045, 0.06, 8);
+  private grenadeLedGeo = new THREE.SphereGeometry(0.032, 6, 6);
+  private waveGeo = new THREE.SphereGeometry(1, 18, 14);
+  private grenadeBodyMat = new THREE.MeshStandardMaterial({ color: 0x365314, roughness: 0.65, metalness: 0.4 });
+  private grenadeCapMat = new THREE.MeshStandardMaterial({ color: 0x94a3b8, roughness: 0.3, metalness: 0.85 });
 
   // Pooled tracers & sparks
   private tracerPool: TracerBeam[] = [];
@@ -220,8 +327,10 @@ export class BattlePlayersEngine {
   private tracerGeo = new THREE.CylinderGeometry(0.014, 0.014, 1, 6);
   private sparkGeo = new THREE.BoxGeometry(0.06, 0.06, 0.06);
 
-  // Input state
+  // Input state (PC + Touch)
   private heldKeys = new Set<string>();
+  private touchMoveVec = new THREE.Vector2(0, 0);
+  private touchFiring = false;
   private mouseDown = false;
   private pointerLocked = false;
   private stepTimer = 0;
@@ -257,6 +366,9 @@ export class BattlePlayersEngine {
       return /SwiftShader|llvmpipe|softpipe|Software|Basic Render/i.test(gpu);
     })();
 
+    const w = container.clientWidth || window.innerWidth;
+    const h = container.clientHeight || window.innerHeight;
+
     this.renderer = new THREE.WebGLRenderer({
       antialias: !this.isSoftwareGl,
       powerPreference: 'high-performance',
@@ -265,7 +377,7 @@ export class BattlePlayersEngine {
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
     this.renderer.toneMappingExposure = 1.1;
     this.renderer.setPixelRatio(this.isSoftwareGl ? 1 : Math.min(window.devicePixelRatio, 2));
-    this.renderer.setSize(container.clientWidth || window.innerWidth, container.clientHeight || window.innerHeight);
+    this.renderer.setSize(w, h);
     this.renderer.shadowMap.enabled = !this.isSoftwareGl;
     this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
     this.renderer.domElement.style.display = 'block';
@@ -278,10 +390,20 @@ export class BattlePlayersEngine {
     this.scene.background = skyColor;
     this.scene.fog = new THREE.FogExp2(0x131b26, 0.0115);
 
-    const aspect = (container.clientWidth || window.innerWidth) / (container.clientHeight || window.innerHeight);
-    this.camera = new THREE.PerspectiveCamera(74, aspect, 0.08, 220);
+    this.camera = new THREE.PerspectiveCamera(74, w / h, 0.08, 220);
     this.camera.rotation.order = 'YXZ';
     this.scene.add(this.camera);
+
+    // Post-processing EffectComposer (skipped on software WebGL per skill guideline)
+    if (!this.isSoftwareGl) {
+      this.composer = new EffectComposer(this.renderer);
+      this.composer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+      this.composer.setSize(w, h);
+      this.composer.addPass(new RenderPass(this.scene, this.camera));
+      this.combatPass = new ShaderPass(CombatPostProcessShader);
+      this.composer.addPass(this.combatPass);
+      this.composer.addPass(new OutputPass());
+    }
 
     // Mandatory studio environment reflection
     const pmrem = new THREE.PMREMGenerator(this.renderer);
@@ -315,19 +437,18 @@ export class BattlePlayersEngine {
     this.arena = buildTacticalArena(this.renderer);
     this.scene.add(this.arena.group);
 
-    // Showcase Avatar on central platform
     this.rebuildShowcaseAvatar();
     this.rebuildFirstPersonWeapon();
 
     // Pre-allocate tracer & spark pools
-    for (let i = 0; i < 16; i++) {
+    for (let i = 0; i < 20; i++) {
       const mat = new THREE.MeshBasicMaterial({ color: 0xfbbf24, transparent: true, opacity: 0.9 });
       const mesh = new THREE.Mesh(this.tracerGeo, mat);
       mesh.visible = false;
       this.scene.add(mesh);
       this.tracerPool.push({ mesh, life: 0, maxLife: 0.08 });
     }
-    for (let i = 0; i < 36; i++) {
+    for (let i = 0; i < 48; i++) {
       const mat = new THREE.MeshBasicMaterial({ color: 0xf59e0b });
       const mesh = new THREE.Mesh(this.sparkGeo, mat);
       mesh.visible = false;
@@ -339,7 +460,6 @@ export class BattlePlayersEngine {
       this.renderer.compile(this.scene, this.camera);
     }
 
-    // Bind events
     this.onResizeBound = this.handleResize.bind(this);
     this.onKeyDownBound = this.handleKeyDown.bind(this);
     this.onKeyUpBound = this.handleKeyUp.bind(this);
@@ -362,6 +482,48 @@ export class BattlePlayersEngine {
     this.tick();
   }
 
+  public setTouchDevice(isTouch: boolean) {
+    this.isTouchDevice = isTouch;
+  }
+
+  public setTouchMove(x: number, y: number) {
+    this.touchMoveVec.set(x, y);
+  }
+
+  public applyTouchLook(dx: number, dy: number) {
+    if (this.viewMode !== 'playing' || this.paused || this.chatOpen || this.matchFinished) return;
+    this.yaw -= dx * this.sensitivity * 1.9;
+    this.pitch = THREE.MathUtils.clamp(
+      this.pitch - dy * this.sensitivity * 1.9,
+      -Math.PI / 2.2,
+      Math.PI / 2.2,
+    );
+  }
+
+  public setTouchFiring(firing: boolean) {
+    this.touchFiring = firing;
+  }
+
+  public triggerJump() {
+    if (this.viewMode === 'playing' && !this.paused && this.alive && this.onGround) {
+      this.playerVel.y = 7.4;
+      this.onGround = false;
+      soundEngine.playFootstep();
+    }
+  }
+
+  public triggerReload() {
+    if (this.viewMode === 'playing' && !this.paused && this.alive) {
+      this.startReload();
+    }
+  }
+
+  public triggerGrenade() {
+    if (this.viewMode === 'playing' && !this.paused && !this.chatOpen && this.alive) {
+      this.throwPlayerGrenade();
+    }
+  }
+
   public setIdentity(playerId: string, name: string, clanTag: string, loadout: AvatarLoadout, sensitivity: number) {
     this.playerId = playerId;
     this.playerName = name;
@@ -381,6 +543,9 @@ export class BattlePlayersEngine {
       this.exitPointerLock();
       this.clearBots();
       this.clearRemotePlayers();
+      this.clearGrenades();
+      this.lowHealthIntensity = 0;
+      this.grenadeShockIntensity = 0;
       if (this.fpWeapon) this.fpWeapon.root.visible = false;
       if (this.showcaseRig) this.showcaseRig.root.visible = true;
     } else {
@@ -393,6 +558,8 @@ export class BattlePlayersEngine {
     this.paused = paused;
     if (paused) {
       this.heldKeys.clear();
+      this.touchMoveVec.set(0, 0);
+      this.touchFiring = false;
       this.mouseDown = false;
       this.exitPointerLock();
     }
@@ -402,12 +569,15 @@ export class BattlePlayersEngine {
     this.chatOpen = open;
     if (open) {
       this.heldKeys.clear();
+      this.touchMoveVec.set(0, 0);
+      this.touchFiring = false;
       this.mouseDown = false;
       this.exitPointerLock();
     }
   }
 
   public requestPointerLock() {
+    if (this.isTouchDevice) return;
     if (this.viewMode === 'playing' && !this.paused && !this.chatOpen && !this.matchFinished) {
       try {
         this.renderer.domElement.requestPointerLock();
@@ -427,9 +597,9 @@ export class BattlePlayersEngine {
     }
   }
 
-  public startOfflineMatch(difficulty: BotDifficulty) {
-    this.matchMode = 'offline';
-    this.roomCode = 'OFFLINE';
+  public startSoloBotMatch(difficulty: BotDifficulty) {
+    this.matchMode = 'solo';
+    this.roomCode = 'ARENA-BOTS';
     this.difficulty = difficulty;
     this.resetMatchState();
     this.clearRemotePlayers();
@@ -514,11 +684,29 @@ export class BattlePlayersEngine {
     soundEngine.playShoot(true);
   }
 
-  public handleRemoteDamaged(targetId: string, hp: number, headshot: boolean) {
+  public handleRemoteGrenadeThrown(
+    ownerId: string,
+    ownerName: string,
+    origin: [number, number, number],
+    velocity: [number, number, number],
+  ) {
+    this.spawnGrenadeEntity(
+      new THREE.Vector3(origin[0], origin[1], origin[2]),
+      new THREE.Vector3(velocity[0], velocity[1], velocity[2]),
+      ownerId,
+      ownerName,
+      false,
+    );
+  }
+
+  public handleRemoteDamaged(targetId: string, hp: number, headshot: boolean, explosive = false) {
     if (targetId === this.playerId) {
       this.hp = hp;
       this.damageFlash = 0.85;
-      this.cameraShake = Math.max(this.cameraShake, 0.08);
+      this.cameraShake = Math.max(this.cameraShake, explosive ? 0.18 : 0.08);
+      if (explosive) {
+        this.grenadeShockIntensity = 1.0;
+      }
       soundEngine.playDamage();
       if (hp <= 0) {
         this.alive = false;
@@ -530,8 +718,7 @@ export class BattlePlayersEngine {
       const actor = this.remotePlayers.get(targetId);
       if (actor) {
         actor.state.hp = hp;
-        actor.hitFlashTimer = 0.14;
-        if (headshot) actor.hitFlashTimer = 0.2;
+        actor.hitFlashTimer = headshot ? 0.2 : 0.14;
       }
     }
   }
@@ -547,6 +734,9 @@ export class BattlePlayersEngine {
       this.kills += 1;
       if (headshot) this.headshots += 1;
       this.score += headshot ? 150 : 100;
+      if (this.kills % 2 === 0 && this.grenades < this.maxGrenades) {
+        this.grenades += 1;
+      }
       this.hitstopTimer = 0.045;
       soundEngine.playKillConfirm();
     }
@@ -571,6 +761,7 @@ export class BattlePlayersEngine {
       this.hp = 100;
       this.alive = true;
       this.ammo = this.maxAmmo;
+      this.grenades = Math.max(this.grenades, 1);
       this.emitHud(true);
     } else {
       const actor = this.remotePlayers.get(playerId);
@@ -601,6 +792,8 @@ export class BattlePlayersEngine {
     this.stamina = 100;
     this.ammo = 30;
     this.reserveAmmo = 150;
+    this.grenades = 2;
+    this.grenadeThrowCooldown = 0;
     this.reloading = false;
     this.reloadTimer = 0;
     this.kills = 0;
@@ -614,7 +807,10 @@ export class BattlePlayersEngine {
     this.matchFinished = false;
     this.paused = false;
     this.chatOpen = false;
+    this.lowHealthIntensity = 0;
+    this.grenadeShockIntensity = 0;
     this.killFeed = [];
+    this.clearGrenades();
   }
 
   private rebuildShowcaseAvatar() {
@@ -674,6 +870,7 @@ export class BattlePlayersEngine {
         score: 0,
         patrolTarget: this.arena.patrolPoints[i % this.arena.patrolPoints.length].clone(),
         fireCooldown: 0.8 + Math.random() * 0.8,
+        grenadeCooldown: 6 + Math.random() * 6,
         windupTimer: 0,
         hitFlashTimer: 0,
         strafeDir: i % 2 === 0 ? 1 : -1,
@@ -702,6 +899,19 @@ export class BattlePlayersEngine {
     this.remotePlayers.clear();
   }
 
+  private clearGrenades() {
+    for (const g of this.activeGrenades) {
+      this.scene.remove(g.group);
+      g.ledMat.dispose();
+    }
+    this.activeGrenades = [];
+    for (const w of this.explosionWaves) {
+      this.scene.remove(w.mesh);
+      w.mat.dispose();
+    }
+    this.explosionWaves = [];
+  }
+
   private handleResize() {
     if (this.disposed) return;
     const w = this.container.clientWidth || window.innerWidth;
@@ -709,10 +919,15 @@ export class BattlePlayersEngine {
     this.camera.aspect = w / h;
     this.camera.updateProjectionMatrix();
     this.renderer.setSize(w, h);
+    if (this.composer) {
+      this.composer.setSize(w, h);
+    }
   }
 
   private handleWindowBlur() {
     this.heldKeys.clear();
+    this.touchMoveVec.set(0, 0);
+    this.touchFiring = false;
     this.mouseDown = false;
     this.isDraggingShowcase = false;
   }
@@ -757,6 +972,10 @@ export class BattlePlayersEngine {
       this.startReload();
     }
 
+    if (e.code === 'KeyG' && !this.paused && this.alive) {
+      this.throwPlayerGrenade();
+    }
+
     if (e.code === 'Space' && !this.paused && this.alive && this.onGround) {
       this.playerVel.y = 7.4;
       this.onGround = false;
@@ -781,7 +1000,7 @@ export class BattlePlayersEngine {
     }
     if (this.viewMode !== 'playing' || this.paused || this.chatOpen || this.matchFinished) return;
 
-    if (!this.pointerLocked) {
+    if (!this.pointerLocked && !this.isTouchDevice) {
       this.requestPointerLock();
       this.isDraggingShowcase = true;
       this.lastDragX = e.clientX;
@@ -813,7 +1032,7 @@ export class BattlePlayersEngine {
         -Math.PI / 2.2,
         Math.PI / 2.2,
       );
-    } else if (this.isDraggingShowcase) {
+    } else if (this.isDraggingShowcase && !this.isTouchDevice) {
       const dx = e.clientX - this.lastDragX;
       const dy = e.clientY - this.lastDragY;
       this.lastDragX = e.clientX;
@@ -832,6 +1051,244 @@ export class BattlePlayersEngine {
     this.reloading = true;
     this.reloadTimer = 0;
     soundEngine.playReload();
+  }
+
+  private throwPlayerGrenade() {
+    if (this.grenades <= 0 || this.grenadeThrowCooldown > 0) return;
+    this.grenades -= 1;
+    this.grenadeThrowCooldown = 0.7;
+    soundEngine.playGrenadeThrow();
+
+    const forward = new THREE.Vector3(0, 0, -1).applyQuaternion(this.camera.quaternion).normalize();
+    const origin = this.camera.position.clone().addScaledVector(forward, 0.75);
+    const vel = forward.multiplyScalar(17.5);
+    vel.y += 4.6;
+
+    this.spawnGrenadeEntity(origin, vel, this.playerId, this.playerName, true);
+    if (this.matchMode === 'multiplayer') {
+      this.callbacks.onMultiplayerGrenadeThrow?.(
+        [origin.x, origin.y, origin.z],
+        [vel.x, vel.y, vel.z],
+      );
+    }
+    this.emitHud(true);
+  }
+
+  private spawnGrenadeEntity(
+    origin: THREE.Vector3,
+    vel: THREE.Vector3,
+    ownerId: string,
+    ownerName: string,
+    isLocalOwner: boolean,
+  ) {
+    const group = new THREE.Group();
+    group.position.copy(origin);
+
+    const body = new THREE.Mesh(this.grenadeBodyGeo, this.grenadeBodyMat);
+    body.castShadow = true;
+    const cap = new THREE.Mesh(this.grenadeCapGeo, this.grenadeCapMat);
+    cap.position.y = 0.11;
+
+    const ledMat = new THREE.MeshBasicMaterial({ color: 0xef4444 });
+    const led = new THREE.Mesh(this.grenadeLedGeo, ledMat);
+    led.position.y = 0.15;
+
+    group.add(body, cap, led);
+    this.scene.add(group);
+
+    this.activeGrenades.push({
+      group,
+      ledMat,
+      pos: origin.clone(),
+      vel: vel.clone(),
+      fuse: 1.75,
+      ownerId,
+      ownerName,
+      isLocalOwner,
+    });
+  }
+
+  private detonateGrenade(g: ActiveGrenade) {
+    this.scene.remove(g.group);
+    g.ledMat.dispose();
+
+    const blastPos = g.pos.clone();
+    const distToPlayer = blastPos.distanceTo(this.playerPos);
+    const audioAtten = Math.max(0.2, 1 - distToPlayer / 45);
+    soundEngine.playExplosion(audioAtten);
+
+    // Expanding shockwave sphere
+    const waveMat = new THREE.MeshBasicMaterial({
+      color: 0xf97316,
+      transparent: true,
+      opacity: 0.65,
+      wireframe: false,
+    });
+    const waveMesh = new THREE.Mesh(this.waveGeo, waveMat);
+    waveMesh.position.copy(blastPos);
+    waveMesh.scale.setScalar(0.3);
+    this.scene.add(waveMesh);
+    this.explosionWaves.push({ mesh: waveMesh, mat: waveMat, life: 0.36, maxLife: 0.36 });
+
+    this.spawnSparks(blastPos, '#f97316', 18);
+
+    const maxRadius = 8.0;
+    const shockRadius = 13.0;
+
+    // Trigger post-processing concussion distortion + camera shake if player is nearby
+    if (distToPlayer < shockRadius) {
+      const shockStrength = Math.pow(1 - distToPlayer / shockRadius, 0.75);
+      this.grenadeShockIntensity = Math.max(this.grenadeShockIntensity, shockStrength);
+      this.cameraShake = Math.max(this.cameraShake, shockStrength * 0.28);
+    }
+
+    // Apply damage in Solo mode (to player + all bots)
+    if (this.matchMode === 'solo') {
+      if (this.alive && distToPlayer < maxRadius) {
+        const selfFactor = g.isLocalOwner ? 0.5 : 1.0;
+        const dmg = Math.round((1 - distToPlayer / maxRadius) * 88 * selfFactor);
+        if (dmg > 0) {
+          this.hp = Math.max(0, this.hp - dmg);
+          this.damageFlash = 0.9;
+          soundEngine.playDamage();
+          if (this.hp <= 0) {
+            this.alive = false;
+            this.deaths += 1;
+            this.respawnTimer = 3.0;
+            const killerBot = this.bots.find((b) => b.id === g.ownerId);
+            if (killerBot) {
+              killerBot.kills += 1;
+              killerBot.score += 125;
+            }
+            this.pushKillFeed(g.isLocalOwner ? 'Granada' : g.ownerName, this.playerName, false);
+          }
+        }
+      }
+
+      for (const bot of this.bots) {
+        if (!bot.alive) continue;
+        const d = blastPos.distanceTo(bot.pos);
+        if (d < maxRadius) {
+          const dmg = Math.round((1 - d / maxRadius) * 92);
+          if (dmg > 0) {
+            bot.hp = Math.max(0, bot.hp - dmg);
+            bot.hitFlashTimer = 0.18;
+            if (g.isLocalOwner) {
+              this.damageDealt += dmg;
+              this.hitmarkerState = 'body';
+              this.hitmarkerTimer = 0.16;
+            }
+            if (bot.hp <= 0) {
+              bot.alive = false;
+              bot.deaths += 1;
+              bot.respawnTimer = 3.0;
+              bot.rig.root.visible = false;
+              bot.laserLine.visible = false;
+
+              if (g.isLocalOwner) {
+                this.kills += 1;
+                this.score += 125;
+                if (this.kills % 2 === 0 && this.grenades < this.maxGrenades) {
+                  this.grenades += 1;
+                }
+                this.hitstopTimer = 0.045;
+                soundEngine.playKillConfirm();
+                this.pushKillFeed(this.playerName, bot.name, false);
+                if (this.kills >= this.killTarget) this.finishMatch();
+              } else {
+                const killerBot = this.bots.find((b) => b.id === g.ownerId);
+                if (killerBot && killerBot.id !== bot.id) {
+                  killerBot.kills += 1;
+                  killerBot.score += 125;
+                  this.pushKillFeed(killerBot.name, bot.name, false);
+                  if (killerBot.kills >= this.killTarget) this.finishMatch();
+                } else {
+                  this.pushKillFeed('Granada', bot.name, false);
+                }
+              }
+            }
+          }
+        }
+      }
+    } else if (g.isLocalOwner) {
+      // Multiplayer authoritative damage report from thrower
+      if (this.alive && distToPlayer < maxRadius) {
+        const dmg = Math.round((1 - distToPlayer / maxRadius) * 45);
+        if (dmg > 0) this.callbacks.onMultiplayerGrenadeDamage?.(this.playerId, dmg);
+      }
+      for (const actor of this.remotePlayers.values()) {
+        if (!actor.state.alive) continue;
+        const d = blastPos.distanceTo(actor.rig.root.position);
+        if (d < maxRadius) {
+          const dmg = Math.round((1 - d / maxRadius) * 90);
+          if (dmg > 0) {
+            this.damageDealt += dmg;
+            this.hitmarkerState = 'body';
+            this.hitmarkerTimer = 0.16;
+            this.callbacks.onMultiplayerGrenadeDamage?.(actor.state.id, dmg);
+          }
+        }
+      }
+    }
+  }
+
+  private updateGrenades(dt: number) {
+    for (let i = this.activeGrenades.length - 1; i >= 0; i--) {
+      const g = this.activeGrenades[i];
+      g.fuse -= dt;
+      g.vel.y -= 18 * dt;
+
+      g.pos.x += g.vel.x * dt;
+      g.pos.y += g.vel.y * dt;
+      g.pos.z += g.vel.z * dt;
+
+      // Arena boundary & obstacle bounce
+      const prevX = g.pos.x;
+      const prevZ = g.pos.z;
+      resolveObstacleCollision(this.arena, g.pos, 0.16, g.pos.y);
+      if (Math.abs(g.pos.x - prevX) > 0.001) g.vel.x *= -0.45;
+      if (Math.abs(g.pos.z - prevZ) > 0.001) g.vel.z *= -0.45;
+
+      const floorY = getGroundHeightAt(this.arena, g.pos.x, g.pos.z, g.pos.y) + 0.12;
+      if (g.pos.y <= floorY) {
+        g.pos.y = floorY;
+        if (Math.abs(g.vel.y) > 1.2) {
+          g.vel.y = -g.vel.y * 0.42;
+          g.vel.x *= 0.72;
+          g.vel.z *= 0.72;
+        } else {
+          g.vel.y = 0;
+          g.vel.x *= 0.85;
+          g.vel.z *= 0.85;
+        }
+      }
+
+      g.group.position.copy(g.pos);
+      g.group.rotation.x += g.vel.z * dt * 2.5;
+      g.group.rotation.z -= g.vel.x * dt * 2.5;
+
+      // Blinking fuse LED
+      const blink = Math.sin(g.fuse * 26) > 0;
+      g.ledMat.color.setHex(blink ? 0xff2222 : 0x330000);
+
+      if (g.fuse <= 0) {
+        this.activeGrenades.splice(i, 1);
+        this.detonateGrenade(g);
+      }
+    }
+
+    for (let i = this.explosionWaves.length - 1; i >= 0; i--) {
+      const w = this.explosionWaves[i];
+      w.life -= dt;
+      const t = 1 - Math.max(0, w.life / w.maxLife);
+      w.mesh.scale.setScalar(0.5 + t * 7.2);
+      w.mat.opacity = Math.max(0, (1 - t) * 0.65);
+      if (w.life <= 0) {
+        this.scene.remove(w.mesh);
+        w.mat.dispose();
+        this.explosionWaves.splice(i, 1);
+      }
+    }
   }
 
   private tryShoot() {
@@ -856,11 +1313,9 @@ export class BattlePlayersEngine {
       this.startReload();
     }
 
-    // Raycast from center screen
     this.raycaster.setFromCamera(new THREE.Vector2(0, 0), this.camera);
     this.raycaster.far = 140;
 
-    // Collect shootable meshes: arena obstacles + bots or remote players
     const targets: THREE.Object3D[] = [...this.arena.raycastMeshes];
     for (const bot of this.bots) {
       if (bot.alive) targets.push(bot.rig.root);
@@ -873,7 +1328,7 @@ export class BattlePlayersEngine {
     const origin = _vec3.copy(this.camera.position);
     origin.y -= 0.06;
 
-    let hitPoint = _vec3b.copy(this.camera.position).addScaledVector(this.raycaster.ray.direction, 65);
+    const hitPoint = _vec3b.copy(this.camera.position).addScaledVector(this.raycaster.ray.direction, 65);
     let hitEntityId: string | null = null;
     let isHeadshot = false;
 
@@ -903,7 +1358,7 @@ export class BattlePlayersEngine {
       this.hitmarkerTimer = 0.16;
       soundEngine.playHitmarker(isHeadshot);
 
-      if (this.matchMode === 'offline') {
+      if (this.matchMode === 'solo') {
         const bot = this.bots.find((b) => b.id === hitEntityId);
         if (bot && bot.alive) {
           const dmg = isHeadshot ? 68 : 34;
@@ -919,6 +1374,9 @@ export class BattlePlayersEngine {
             this.kills += 1;
             if (isHeadshot) this.headshots += 1;
             this.score += isHeadshot ? 150 : 100;
+            if (this.kills % 2 === 0 && this.grenades < this.maxGrenades) {
+              this.grenades += 1;
+            }
             this.hitstopTimer = 0.045;
             soundEngine.playKillConfirm();
             this.pushKillFeed(this.playerName, bot.name, isHeadshot);
@@ -970,8 +1428,8 @@ export class BattlePlayersEngine {
         s.mesh.visible = true;
         s.mesh.position.copy(pos);
         (s.mesh.material as THREE.MeshBasicMaterial).color.set(colorHex);
-        s.vel.set((Math.random() - 0.5) * 7, 1.5 + Math.random() * 4, (Math.random() - 0.5) * 7);
-        s.life = 0.28;
+        s.vel.set((Math.random() - 0.5) * 7.5, 1.8 + Math.random() * 4.5, (Math.random() - 0.5) * 7.5);
+        s.life = 0.3;
         spawned += 1;
         if (spawned >= count) break;
       }
@@ -1000,26 +1458,31 @@ export class BattlePlayersEngine {
     if (this.paused || this.matchFinished) return;
 
     this.matchElapsed += dt;
-    if (this.matchMode === 'offline' && this.matchElapsed >= this.matchDuration) {
+    if (this.matchMode === 'solo' && this.matchElapsed >= this.matchDuration) {
       this.finishMatch();
       return;
     }
 
+    // Post-process intensities decay smoothly even during respawn
+    const targetLowHp = this.alive && this.hp < 50 ? (50 - this.hp) / 50 : 0;
+    this.lowHealthIntensity = THREE.MathUtils.damp(this.lowHealthIntensity, targetLowHp, 6, dt);
+    this.grenadeShockIntensity = THREE.MathUtils.damp(this.grenadeShockIntensity, 0, 2.8, dt);
+
     if (!this.alive) {
       this.respawnTimer -= dt;
-      if (this.matchMode === 'offline' && this.respawnTimer <= 0) {
+      if (this.matchMode === 'solo' && this.respawnTimer <= 0) {
         const spawn = this.arena.spawnPoints[Math.floor(Math.random() * this.arena.spawnPoints.length)];
         this.playerPos.copy(spawn);
         this.playerVel.set(0, 0, 0);
         this.hp = 100;
         this.alive = true;
         this.ammo = this.maxAmmo;
+        this.grenades = Math.max(this.grenades, 1);
         this.reloading = false;
       }
       return;
     }
 
-    // Reload progress
     if (this.reloading) {
       this.reloadTimer += dt;
       if (this.reloadTimer >= this.reloadDuration) {
@@ -1032,22 +1495,22 @@ export class BattlePlayersEngine {
       }
     }
 
-    // Cooldowns & recoil decay
     this.fireCooldown = Math.max(0, this.fireCooldown - dt);
+    this.grenadeThrowCooldown = Math.max(0, this.grenadeThrowCooldown - dt);
     this.recoilPitch = THREE.MathUtils.damp(this.recoilPitch, 0, 14, dt);
     this.weaponKick = THREE.MathUtils.damp(this.weaponKick, 0, 16, dt);
-    this.cameraShake = THREE.MathUtils.damp(this.cameraShake, 0, 18, dt);
+    this.cameraShake = THREE.MathUtils.damp(this.cameraShake, 0, 16, dt);
     this.damageFlash = THREE.MathUtils.damp(this.damageFlash, 0, 8, dt);
     if (this.hitmarkerTimer > 0) {
       this.hitmarkerTimer -= dt;
       if (this.hitmarkerTimer <= 0) this.hitmarkerState = 'none';
     }
 
-    if (this.mouseDown && !this.chatOpen) {
+    if ((this.mouseDown || this.touchFiring) && !this.chatOpen) {
       this.tryShoot();
     }
 
-    // Movement
+    // Combined Keyboard + Android Touch Analog Movement
     let moveF = 0;
     let moveR = 0;
     if (!this.chatOpen) {
@@ -1055,10 +1518,13 @@ export class BattlePlayersEngine {
       if (this.heldKeys.has('KeyS') || this.heldKeys.has('ArrowDown')) moveF -= 1;
       if (this.heldKeys.has('KeyA') || this.heldKeys.has('ArrowLeft')) moveR -= 1;
       if (this.heldKeys.has('KeyD') || this.heldKeys.has('ArrowRight')) moveR += 1;
+      moveF += this.touchMoveVec.y;
+      moveR += this.touchMoveVec.x;
     }
 
-    const sprinting = this.heldKeys.has('ShiftLeft') && moveF > 0 && this.stamina > 5;
-    if (sprinting && (moveF !== 0 || moveR !== 0)) {
+    const touchSprint = this.touchMoveVec.length() > 0.85;
+    const sprinting = (this.heldKeys.has('ShiftLeft') || touchSprint) && moveF > 0.2 && this.stamina > 5;
+    if (sprinting && (Math.abs(moveF) > 0.05 || Math.abs(moveR) > 0.05)) {
       this.stamina = Math.max(0, this.stamina - 28 * dt);
     } else {
       this.stamina = Math.min(100, this.stamina + 20 * dt);
@@ -1068,13 +1534,13 @@ export class BattlePlayersEngine {
     const sinY = Math.sin(this.yaw);
     const cosY = Math.cos(this.yaw);
 
-    // Forward vector is (-sin(yaw), 0, -cos(yaw)); Right is (cos(yaw), 0, -sin(yaw))
     const wishX = -sinY * moveF + cosY * moveR;
     const wishZ = -cosY * moveF - sinY * moveR;
     const wishLen = Math.hypot(wishX, wishZ);
-    if (wishLen > 0.001) {
-      this.playerVel.x = (wishX / wishLen) * speed;
-      this.playerVel.z = (wishZ / wishLen) * speed;
+    if (wishLen > 0.05) {
+      const normScale = Math.min(1, wishLen);
+      this.playerVel.x = (wishX / wishLen) * speed * normScale;
+      this.playerVel.z = (wishZ / wishLen) * speed * normScale;
       if (this.onGround) {
         this.stepTimer -= dt * (sprinting ? 1.5 : 1.0);
         if (this.stepTimer <= 0) {
@@ -1087,7 +1553,6 @@ export class BattlePlayersEngine {
       this.playerVel.z = THREE.MathUtils.damp(this.playerVel.z, 0, 14, dt);
     }
 
-    // Gravity & Ground
     this.playerVel.y -= 20 * dt;
     this.playerPos.x += this.playerVel.x * dt;
     this.playerPos.z += this.playerVel.z * dt;
@@ -1104,7 +1569,6 @@ export class BattlePlayersEngine {
       this.onGround = false;
     }
 
-    // Camera position + subtle head bob + shake
     const moving = wishLen > 0.1 && this.onGround;
     const bob = moving ? Math.sin(this.matchElapsed * (sprinting ? 14 : 9.5)) * 0.035 : 0;
     const shakeX = (Math.random() - 0.5) * this.cameraShake;
@@ -1118,7 +1582,6 @@ export class BattlePlayersEngine {
     _euler.set(this.pitch + this.recoilPitch, this.yaw, 0, 'YXZ');
     this.camera.quaternion.setFromEuler(_euler);
 
-    // First-person weapon recoil & reload animation
     if (this.fpWeapon) {
       const reloadTilt = this.reloading ? Math.sin((this.reloadTimer / this.reloadDuration) * Math.PI) * 0.45 : 0;
       this.fpWeapon.root.position.set(
@@ -1139,7 +1602,6 @@ export class BattlePlayersEngine {
       }
     }
 
-    // Network position broadcast (~20Hz)
     if (this.matchMode === 'multiplayer' && performance.now() - this.lastNetMoveEmit > 50) {
       this.lastNetMoveEmit = performance.now();
       this.callbacks.onMultiplayerMove?.(
@@ -1164,7 +1626,7 @@ export class BattlePlayersEngine {
   }
 
   private updateBots(dt: number) {
-    if (this.matchMode !== 'offline' || this.paused || this.matchFinished) return;
+    if (this.matchMode !== 'solo' || this.paused || this.matchFinished) return;
 
     const accuracyMap: Record<BotDifficulty, number> = { recluta: 0.25, veterano: 0.45, elite: 0.68 };
     const speedMap: Record<BotDifficulty, number> = { recluta: 3.6, veterano: 4.8, elite: 5.8 };
@@ -1172,7 +1634,6 @@ export class BattlePlayersEngine {
     const botAccuracy = accuracyMap[this.difficulty];
 
     for (const bot of this.bots) {
-      // Hit flash decay
       if (bot.hitFlashTimer > 0) {
         bot.hitFlashTimer -= dt;
         for (const m of bot.rig.hitMaterials) {
@@ -1194,73 +1655,130 @@ export class BattlePlayersEngine {
         continue;
       }
 
-      const distToPlayer = bot.pos.distanceTo(this.playerPos);
+      bot.grenadeCooldown = Math.max(0, bot.grenadeCooldown - dt);
+
+      // Scan ALL alive targets: the human player AND every other alive bot!
       const eyeFrom = _vec3.set(bot.pos.x, bot.pos.y + 1.5, bot.pos.z);
-      const eyeTo = _vec3b.set(this.playerPos.x, this.playerPos.y + 1.5, this.playerPos.z);
-      const canSeePlayer = this.alive && distToPlayer < 42 && this.hasLineOfSight(eyeFrom, eyeTo);
+      let chosenTargetType: 'player' | 'bot' | null = null;
+      let chosenBot: BotActor | null = null;
+      let chosenDist = Infinity;
+      let chosenPos = this.playerPos;
 
-      if (canSeePlayer) {
-        const targetYaw = Math.atan2(this.playerPos.x - bot.pos.x, this.playerPos.z - bot.pos.z);
-        bot.yaw = targetYaw;
+      if (this.alive) {
+        const dPlayer = bot.pos.distanceTo(this.playerPos);
+        const eyeToPlayer = _vec3b.set(this.playerPos.x, this.playerPos.y + 1.5, this.playerPos.z);
+        if (dPlayer < 42 && this.hasLineOfSight(eyeFrom, eyeToPlayer)) {
+          chosenTargetType = 'player';
+          chosenDist = dPlayer;
+          chosenPos = this.playerPos;
+        }
+      }
 
-        // Strafe & engage
+      for (const other of this.bots) {
+        if (other.id === bot.id || !other.alive) continue;
+        const dOther = bot.pos.distanceTo(other.pos);
+        if (dOther < chosenDist && dOther < 40) {
+          const eyeToOther = _vec3b.set(other.pos.x, other.pos.y + 1.5, other.pos.z);
+          if (this.hasLineOfSight(eyeFrom, eyeToOther)) {
+            chosenTargetType = 'bot';
+            chosenBot = other;
+            chosenDist = dOther;
+            chosenPos = other.pos;
+          }
+        }
+      }
+
+      if (chosenTargetType) {
+        bot.yaw = Math.atan2(chosenPos.x - bot.pos.x, chosenPos.z - bot.pos.z);
+
         bot.strafeTimer -= dt;
         if (bot.strafeTimer <= 0) {
           bot.strafeTimer = 1.2 + Math.random() * 1.4;
           bot.strafeDir *= -1;
         }
 
-        const forwardMove = distToPlayer > 14 ? 0.85 : distToPlayer < 7 ? -0.6 : 0;
+        const forwardMove = chosenDist > 14 ? 0.85 : chosenDist < 7 ? -0.6 : 0;
         const moveX = Math.sin(bot.yaw) * forwardMove + Math.cos(bot.yaw) * bot.strafeDir * 0.7;
         const moveZ = Math.cos(bot.yaw) * forwardMove - Math.sin(bot.yaw) * bot.strafeDir * 0.7;
         const mLen = Math.hypot(moveX, moveZ) || 1;
         bot.pos.x += (moveX / mLen) * botSpeed * dt;
         bot.pos.z += (moveZ / mLen) * botSpeed * dt;
 
-        // Telegraph & shoot
+        // Occasional frag grenade throw at medium range
+        if (bot.grenadeCooldown <= 0 && chosenDist > 8 && chosenDist < 20 && Math.random() < 0.35) {
+          bot.grenadeCooldown = this.difficulty === 'elite' ? 8 : 13;
+          const gOrigin = new THREE.Vector3(bot.pos.x, bot.pos.y + 1.55, bot.pos.z);
+          const toTarget = chosenPos.clone().sub(bot.pos);
+          toTarget.y = 0;
+          const dist = Math.max(1, toTarget.length());
+          const gVel = toTarget.normalize().multiplyScalar(Math.min(18, dist * 0.95));
+          gVel.y = 5.2;
+          this.spawnGrenadeEntity(gOrigin, gVel, bot.id, bot.name, false);
+          soundEngine.playGrenadeThrow();
+        }
+
+        // Fire with windup telegraph
         bot.fireCooldown -= dt;
         if (bot.fireCooldown <= 0) {
           if (bot.windupTimer <= 0) {
-            bot.windupTimer = this.difficulty === 'recluta' ? 0.5 : 0.32;
+            bot.windupTimer = this.difficulty === 'recluta' ? 0.45 : 0.28;
           } else {
             bot.windupTimer -= dt;
-            // Visible laser windup telegraph
             bot.laserLine.visible = true;
             const posAttr = bot.laserLine.geometry.attributes.position as THREE.BufferAttribute;
             posAttr.setXYZ(0, bot.pos.x, bot.pos.y + 1.35, bot.pos.z);
-            posAttr.setXYZ(1, this.playerPos.x, this.playerPos.y + 1.4, this.playerPos.z);
+            posAttr.setXYZ(1, chosenPos.x, chosenPos.y + 1.4, chosenPos.z);
             posAttr.needsUpdate = true;
 
             if (bot.windupTimer <= 0) {
               bot.laserLine.visible = false;
-              bot.fireCooldown = this.difficulty === 'recluta' ? 1.15 : this.difficulty === 'veterano' ? 0.78 : 0.52;
+              bot.fireCooldown = this.difficulty === 'recluta' ? 1.1 : this.difficulty === 'veterano' ? 0.75 : 0.5;
               soundEngine.playShoot(true);
 
-              const hitRoll = Math.random();
-              const hitsPlayer = hitRoll < botAccuracy;
+              const hitsTarget = Math.random() < botAccuracy;
               const muzzlePos = new THREE.Vector3(bot.pos.x, bot.pos.y + 1.35, bot.pos.z);
-              const shotEnd = hitsPlayer
-                ? new THREE.Vector3(this.playerPos.x, this.playerPos.y + 1.45, this.playerPos.z)
+              const shotEnd = hitsTarget
+                ? new THREE.Vector3(chosenPos.x, chosenPos.y + 1.45, chosenPos.z)
                 : new THREE.Vector3(
-                    this.playerPos.x + (Math.random() - 0.5) * 3,
-                    this.playerPos.y + 1.2 + (Math.random() - 0.5) * 1.5,
-                    this.playerPos.z + (Math.random() - 0.5) * 3,
+                    chosenPos.x + (Math.random() - 0.5) * 3,
+                    chosenPos.y + 1.2 + (Math.random() - 0.5) * 1.4,
+                    chosenPos.z + (Math.random() - 0.5) * 3,
                   );
               this.spawnTracer(muzzlePos, shotEnd, '#ef4444');
 
-              if (hitsPlayer && this.alive) {
-                const dmg = this.difficulty === 'recluta' ? 10 : this.difficulty === 'veterano' ? 15 : 20;
-                this.hp = Math.max(0, this.hp - dmg);
-                this.damageFlash = 0.85;
-                this.cameraShake = Math.max(this.cameraShake, 0.085);
-                soundEngine.playDamage();
-                if (this.hp <= 0) {
-                  this.alive = false;
-                  this.deaths += 1;
-                  this.respawnTimer = 3.0;
-                  bot.kills += 1;
-                  bot.score += 100;
-                  this.pushKillFeed(bot.name, this.playerName, false);
+              if (hitsTarget) {
+                if (chosenTargetType === 'player' && this.alive) {
+                  const dmg = this.difficulty === 'recluta' ? 10 : this.difficulty === 'veterano' ? 15 : 20;
+                  this.hp = Math.max(0, this.hp - dmg);
+                  this.damageFlash = 0.85;
+                  this.cameraShake = Math.max(this.cameraShake, 0.085);
+                  soundEngine.playDamage();
+                  if (this.hp <= 0) {
+                    this.alive = false;
+                    this.deaths += 1;
+                    this.respawnTimer = 3.0;
+                    bot.kills += 1;
+                    bot.score += 100;
+                    this.pushKillFeed(bot.name, this.playerName, false);
+                    if (bot.kills >= this.killTarget) this.finishMatch();
+                  }
+                } else if (chosenTargetType === 'bot' && chosenBot && chosenBot.alive) {
+                  const isHead = Math.random() < 0.2;
+                  const dmg = isHead ? 55 : 28;
+                  chosenBot.hp = Math.max(0, chosenBot.hp - dmg);
+                  chosenBot.hitFlashTimer = 0.12;
+                  this.spawnSparks(shotEnd, '#ef4444', 4);
+                  if (chosenBot.hp <= 0) {
+                    chosenBot.alive = false;
+                    chosenBot.deaths += 1;
+                    chosenBot.respawnTimer = 3.0;
+                    chosenBot.rig.root.visible = false;
+                    chosenBot.laserLine.visible = false;
+                    bot.kills += 1;
+                    bot.score += isHead ? 150 : 100;
+                    this.pushKillFeed(bot.name, chosenBot.name, isHead);
+                    if (bot.kills >= this.killTarget) this.finishMatch();
+                  }
                 }
               }
             }
@@ -1270,7 +1788,6 @@ export class BattlePlayersEngine {
         bot.laserLine.visible = false;
         bot.windupTimer = 0;
 
-        // Patrol toward waypoint
         const toPatrolX = bot.patrolTarget.x - bot.pos.x;
         const toPatrolZ = bot.patrolTarget.z - bot.pos.z;
         const dist = Math.hypot(toPatrolX, toPatrolZ);
@@ -1292,7 +1809,6 @@ export class BattlePlayersEngine {
       bot.rig.root.position.copy(bot.pos);
       bot.rig.root.rotation.y = bot.yaw;
 
-      // Procedural leg swing
       const swing = Math.sin(this.matchElapsed * 9 + Number(bot.id.slice(-1))) * 0.45;
       bot.rig.leftLeg.rotation.x = swing;
       bot.rig.rightLeg.rotation.x = -swing;
@@ -1305,7 +1821,6 @@ export class BattlePlayersEngine {
       const prevX = actor.rig.root.position.x;
       const prevZ = actor.rig.root.position.z;
       actor.rig.root.position.lerp(actor.targetPos, 1 - Math.exp(-14 * dt));
-      // Three.js character faces +Z while FPS yaw looks along -Z
       actor.rig.root.rotation.y = actor.targetYaw + Math.PI;
 
       const moved = Math.hypot(actor.rig.root.position.x - prevX, actor.rig.root.position.z - prevZ);
@@ -1379,7 +1894,7 @@ export class BattlePlayersEngine {
       },
     ];
 
-    if (this.matchMode === 'offline') {
+    if (this.matchMode === 'solo') {
       for (const b of this.bots) {
         entries.push({
           id: b.id,
@@ -1421,6 +1936,8 @@ export class BattlePlayersEngine {
       ammo: this.ammo,
       maxAmmo: this.maxAmmo,
       reserveAmmo: this.reserveAmmo,
+      grenades: this.grenades,
+      maxGrenades: this.maxGrenades,
       reloading: this.reloading,
       reloadProgress: this.reloading ? Math.min(1, this.reloadTimer / this.reloadDuration) : 0,
       stamina: Math.round(this.stamina),
@@ -1432,6 +1949,8 @@ export class BattlePlayersEngine {
       killTarget: this.killTarget,
       hitmarker: this.hitmarkerState,
       damageFlash: this.damageFlash,
+      lowHealthIntensity: this.lowHealthIntensity,
+      grenadeShockIntensity: this.grenadeShockIntensity,
       crosshairSpread: Math.min(18, this.weaponKick * 140 + (this.playerVel.length() > 1 ? 4 : 0)),
       pointerLocked: this.pointerLocked,
       alive: this.alive,
@@ -1466,7 +1985,6 @@ export class BattlePlayersEngine {
     const elapsed = this.clock.elapsedTime;
 
     if (this.viewMode === 'title') {
-      // Atmospheric orbital camera pan over the live tactical arena
       const angle = elapsed * 0.14;
       const targetX = Math.cos(angle) * 21;
       const targetZ = Math.sin(angle) * 21;
@@ -1478,7 +1996,6 @@ export class BattlePlayersEngine {
         this.showcaseRig.root.rotation.y = Math.sin(elapsed * 0.5) * 0.35;
       }
     } else if (this.viewMode === 'shop') {
-      // Showcase camera smoothly framing the customized 3D operator on the bridge
       if (!this.isDraggingShowcase) {
         this.shopOrbitYaw += dt * 0.38;
       }
@@ -1498,12 +2015,23 @@ export class BattlePlayersEngine {
         this.updatePlayer(dt);
         this.updateBots(dt);
         this.updateRemoteActors(dt);
+        this.updateGrenades(dt);
         this.updateEffects(dt);
       }
       this.emitHud(false);
     }
 
-    this.renderer.render(this.scene, this.camera);
+    if (this.combatPass) {
+      this.combatPass.uniforms.time.value = elapsed;
+      this.combatPass.uniforms.lowHealth.value = this.viewMode === 'playing' ? this.lowHealthIntensity : 0;
+      this.combatPass.uniforms.grenadeShock.value = this.viewMode === 'playing' ? this.grenadeShockIntensity : 0;
+    }
+
+    if (this.isSoftwareGl || !this.composer) {
+      this.renderer.render(this.scene, this.camera);
+    } else {
+      this.composer.render();
+    }
 
     if (this.isSoftwareGl) {
       this.afterDraw(this.tick);
@@ -1529,13 +2057,21 @@ export class BattlePlayersEngine {
 
     this.clearBots();
     this.clearRemotePlayers();
+    this.clearGrenades();
     this.showcaseRig?.dispose();
     this.fpWeapon?.dispose();
     this.arena.dispose();
+    this.grenadeBodyGeo.dispose();
+    this.grenadeCapGeo.dispose();
+    this.grenadeLedGeo.dispose();
+    this.waveGeo.dispose();
+    this.grenadeBodyMat.dispose();
+    this.grenadeCapMat.dispose();
     this.tracerGeo.dispose();
     this.sparkGeo.dispose();
     this.tracerPool.forEach((t) => (t.mesh.material as THREE.Material).dispose());
     this.sparkPool.forEach((s) => (s.mesh.material as THREE.Material).dispose());
+    this.composer?.dispose();
     this.renderer.dispose();
     if (this.renderer.domElement.parentElement === this.container) {
       this.container.removeChild(this.renderer.domElement);

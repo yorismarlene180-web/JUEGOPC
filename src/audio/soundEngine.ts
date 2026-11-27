@@ -169,6 +169,64 @@ class TacticalSoundEngine {
     osc.stop(now + 0.06);
   }
 
+  public playGrenadeThrow() {
+    const ctx = this.ensureContext();
+    if (!ctx) return;
+    const now = ctx.currentTime;
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.type = 'sine';
+    osc.frequency.setValueAtTime(280, now);
+    osc.frequency.exponentialRampToValueAtTime(110, now + 0.12);
+    gain.gain.setValueAtTime(0.18 * this.masterVolume, now);
+    gain.gain.exponentialRampToValueAtTime(0.001, now + 0.13);
+    osc.connect(gain).connect(ctx.destination);
+    osc.start(now);
+    osc.stop(now + 0.14);
+  }
+
+  public playExplosion(distanceFactor = 1) {
+    const ctx = this.ensureContext();
+    if (!ctx) return;
+    const now = ctx.currentTime;
+    const atten = Math.max(0.18, Math.min(1, distanceFactor));
+    const vol = 0.72 * this.masterVolume * atten;
+
+    // Deep sub-bass concussion
+    const osc = ctx.createOscillator();
+    const oscGain = ctx.createGain();
+    osc.type = 'sine';
+    osc.frequency.setValueAtTime(95, now);
+    osc.frequency.exponentialRampToValueAtTime(22, now + 0.55);
+    oscGain.gain.setValueAtTime(vol, now);
+    oscGain.gain.exponentialRampToValueAtTime(0.001, now + 0.6);
+    osc.connect(oscGain).connect(ctx.destination);
+    osc.start(now);
+    osc.stop(now + 0.62);
+
+    // Filtered explosion roar
+    const bufferSize = Math.floor(ctx.sampleRate * 0.65);
+    const buffer = ctx.createBuffer(1, bufferSize, ctx.sampleRate);
+    const data = buffer.getChannelData(0);
+    for (let i = 0; i < bufferSize; i++) {
+      data[i] = (Math.random() * 2 - 1) * Math.exp(-i / (bufferSize * 0.25));
+    }
+    const noise = ctx.createBufferSource();
+    noise.buffer = buffer;
+
+    const filter = ctx.createBiquadFilter();
+    filter.type = 'lowpass';
+    filter.frequency.setValueAtTime(720, now);
+    filter.frequency.exponentialRampToValueAtTime(140, now + 0.6);
+
+    const nGain = ctx.createGain();
+    nGain.gain.setValueAtTime(vol * 0.95, now);
+    nGain.gain.exponentialRampToValueAtTime(0.001, now + 0.65);
+
+    noise.connect(filter).connect(nGain).connect(ctx.destination);
+    noise.start(now);
+  }
+
   public playReward() {
     const ctx = this.ensureContext();
     if (!ctx) return;

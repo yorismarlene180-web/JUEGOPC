@@ -318,7 +318,7 @@ function applyMatchReport(body: {
   kills: number;
   deaths: number;
   won: boolean;
-  mode: 'offline' | 'multiplayer';
+  mode: 'solo' | 'multiplayer';
 }) {
   const cleanName = String(body.name || 'Operador').slice(0, 20);
   const cleanTag = String(body.clanTag || '').slice(0, 4).toUpperCase();
@@ -753,6 +753,52 @@ async function startServer() {
               p.alive = true;
             }
           }
+        }
+      } else if (type === 'grenade:throw') {
+        if (!player.alive) return;
+        broadcastRoom(
+          room,
+          {
+            type: 'grenade:thrown',
+            ownerId: player.id,
+            ownerName: player.name,
+            origin: msg.origin,
+            velocity: msg.velocity,
+          },
+          player.id,
+        );
+      } else if (type === 'grenade:damage') {
+        const targetId = String(msg.targetId || '');
+        const dmg = Math.max(0, Math.min(95, Number(msg.damage) || 0));
+        const target = room.players.get(targetId);
+        if (!target || !target.alive || dmg <= 0) return;
+
+        target.hp = Math.max(0, target.hp - dmg);
+        broadcastRoom(room, {
+          type: 'player:damaged',
+          targetId: target.id,
+          attackerId: player.id,
+          hp: target.hp,
+          headshot: false,
+          explosive: true,
+        });
+
+        if (target.hp <= 0) {
+          target.alive = false;
+          target.deaths += 1;
+          target.respawnAt = Date.now() + 3000;
+          if (target.id !== player.id) {
+            player.kills += 1;
+            player.score += 125;
+          }
+          broadcastRoom(room, {
+            type: 'player:killed',
+            killerId: player.id,
+            killerName: target.id === player.id ? 'Granada' : player.name,
+            victimId: target.id,
+            victimName: target.name,
+            headshot: false,
+          });
         }
       } else if (type === 'voice:speaking') {
         player.isSpeaking = Boolean(msg.speaking);

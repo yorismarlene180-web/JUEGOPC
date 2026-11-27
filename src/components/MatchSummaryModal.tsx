@@ -97,12 +97,12 @@ function generateAchievementCardPng(
   const achText =
     summary.unlockedAchievements.length > 0
       ? `Logros desbloqueados: ${summary.unlockedAchievements.map((id) => ACHIEVEMENT_META[id]?.title || id).join(' · ')}`
-      : `Modo ${summary.mode === 'offline' ? 'Offline Bots' : `Multijugador (${summary.roomCode})`} · +${summary.coinsEarned} Monedas`;
+      : `Modo ${summary.mode === 'solo' ? 'Arena Bots Online' : `Multijugador (${summary.roomCode})`} · +${summary.coinsEarned} Monedas`;
   ctx.fillText(achText, 64, 520);
 
   ctx.fillStyle = '#64748b';
   ctx.font = '18px sans-serif';
-  ctx.fillText('battleplayers-pc · Arena Táctica 3D', 64, 566);
+  ctx.fillText('battleplayers-online · Arena Táctica 3D', 64, 566);
 
   return canvas.toDataURL('image/png');
 }
@@ -119,7 +119,7 @@ export const MatchSummaryModal: React.FC<MatchSummaryModalProps> = ({
   const accuracy =
     summary.shotsFired > 0 ? Math.round((summary.shotsHit / summary.shotsFired) * 100) : 0;
 
-  const shareText = `Acabo de terminar en el puesto #${summary.placement} en BATTLEPLAYERS (PC 3D) con ${summary.kills} bajas, ${summary.headshots} headshots y ${accuracy}% de precisión.${
+  const shareText = `Acabo de terminar en el puesto #${summary.placement} en BATTLEPLAYERS (3D) con ${summary.kills} bajas, ${summary.headshots} headshots y ${accuracy}% de precisión.${
     summary.unlockedAchievements.length > 0
       ? ` Logros: ${summary.unlockedAchievements.map((a) => ACHIEVEMENT_META[a]?.title || a).join(', ')}.`
       : ''
@@ -168,7 +168,7 @@ export const MatchSummaryModal: React.FC<MatchSummaryModalProps> = ({
         <div className="flex flex-wrap items-start justify-between gap-4 border-b border-slate-800 pb-5 mb-6">
           <div>
             <div className="text-xs font-semibold text-amber-400 mb-1">
-              {summary.mode === 'offline' ? 'Partida Offline con Bots' : `Sala Multijugador · ${summary.roomCode}`}
+              {summary.mode === 'solo' ? 'Arena Individual con Bots · En Línea' : `Sala Multijugador · ${summary.roomCode}`}
             </div>
             <h2 className="font-display text-3xl font-bold text-white">
               {summary.won ? 'Victoria en la Arena' : `Puesto #${summary.placement} Finalizado`}

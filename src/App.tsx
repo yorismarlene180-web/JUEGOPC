@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { Maximize2, RotateCw, WifiOff } from 'lucide-react';
 import { soundEngine } from './audio/soundEngine';
 import { voiceChat, type VoiceStatus } from './audio/voiceChat';
 import { GameHUD } from './components/GameHUD';
@@ -24,6 +25,8 @@ const INITIAL_HUD: HudSnapshot = {
   ammo: 30,
   maxAmmo: 30,
   reserveAmmo: 150,
+  grenades: 2,
+  maxGrenades: 2,
   reloading: false,
   reloadProgress: 0,
   stamina: 100,
@@ -35,6 +38,8 @@ const INITIAL_HUD: HudSnapshot = {
   killTarget: 15,
   hitmarker: 'none',
   damageFlash: 0,
+  lowHealthIntensity: 0,
+  grenadeShockIntensity: 0,
   crosshairSpread: 0,
   pointerLocked: false,
   alive: true,
@@ -53,9 +58,9 @@ export default function App() {
 
   const [screen, setScreen] = useState<ScreenState>('title');
   const [hubTab, setHubTab] = useState<HubTab>('play');
-  const [matchMode, setMatchMode] = useState<'offline' | 'multiplayer'>('offline');
+  const [matchMode, setMatchMode] = useState<'solo' | 'multiplayer'>('solo');
   const [lastDifficulty, setLastDifficulty] = useState<BotDifficulty>('veterano');
-  const [roomCode, setRoomCode] = useState('OFFLINE');
+  const [roomCode, setRoomCode] = useState('ARENA-BOTS');
   const [paused, setPaused] = useState(false);
   const [chatOpen, setChatOpen] = useState(false);
   const [scoreboardOpen, setScoreboardOpen] = useState(false);
@@ -63,8 +68,21 @@ export default function App() {
   const [matchSummary, setMatchSummary] = useState<MatchSummary | null>(null);
   const [webglLost, setWebglLost] = useState(false);
 
-  // Real-time Server State
+  // Internet Connectivity & Android Horizontal Fullscreen Detection
+  const [browserOnline, setBrowserOnline] = useState(() =>
+    typeof navigator !== 'undefined' ? navigator.onLine : true,
+  );
   const [wsConnected, setWsConnected] = useState(false);
+  const [isTouchDevice, setIsTouchDevice] = useState(() => {
+    if (typeof window === 'undefined') return false;
+    return /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent) ||
+      (navigator.maxTouchPoints > 0 && window.innerWidth <= 1024);
+  });
+  const [isPortrait, setIsPortrait] = useState(() =>
+    typeof window !== 'undefined' ? window.innerHeight > window.innerWidth : false,
+  );
+
+  // Real-time Server State
   const [leaderboard, setLeaderboard] = useState<LeaderboardEntry[]>([]);
   const [clans, setClans] = useState<ClanInfo[]>([]);
   const [rooms, setRooms] = useState<RoomSummary[]>([]);
@@ -79,6 +97,62 @@ export default function App() {
       return next;
     });
   }, []);
+
+  const requestFullscreenLandscape = useCallback(async () => {
+    try {
+      const docEl = document.documentElement;
+      if (!document.fullscreenElement && docEl.requestFullscreen) {
+        await docEl.requestFullscreen();
+      }
+      const orientation = window.screen?.orientation as
+        | (ScreenOrientation & { lock?: (o: string) => Promise<void> })
+        | undefined;
+      if (orientation?.lock) {
+        await orientation.lock('landscape');
+      }
+    } catch {
+      // Some browsers restrict orientation.lock outside standalone PWA; fullscreen still engages
+    }
+  }, []);
+
+  // Track online/offline & orientation changes
+  useEffect(() => {
+    const onOnline = () => {
+      setBrowserOnline(true);
+      mpClient.connect();
+    };
+    const onOffline = () => {
+      setBrowserOnline(false);
+    };
+    const onResize = () => {
+      setIsPortrait(window.innerHeight > window.innerWidth);
+      const touch =
+        /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent) ||
+        (navigator.maxTouchPoints > 0 && window.innerWidth <= 1024);
+      setIsTouchDevice(touch);
+      engineRef.current?.setTouchDevice(touch);
+    };
+
+    window.addEventListener('online', onOnline);
+    window.addEventListener('offline', onOffline);
+    window.addEventListener('resize', onResize);
+    window.addEventListener('orientationchange', onResize);
+    return () => {
+      window.removeEventListener('online', onOnline);
+      window.removeEventListener('offline', onOffline);
+      window.removeEventListener('resize', onResize);
+      window.removeEventListener('orientationchange', onResize);
+    };
+  }, []);
+
+  // Pause engine automatically if internet drops
+  useEffect(() => {
+    if (!browserOnline && screen === 'playing') {
+      engineRef.current?.setPaused(true);
+    } else if (browserOnline && screen === 'playing' && !paused) {
+      engineRef.current?.setPaused(false);
+    }
+  }, [browserOnline, screen, paused]);
 
   // Sync audio mute setting
   useEffect(() => {
@@ -96,7 +170,7 @@ export default function App() {
     );
   }, [profile.id, profile.name, profile.clanTag, profile.loadout, profile.sensitivity]);
 
-  // Sync engine view mode when navigating Title / Hub / Shop / Playing
+  // Sync engine view mode
   useEffect(() => {
     if (!engineRef.current) return;
     if (screen === 'playing') {
@@ -147,7 +221,7 @@ export default function App() {
           if (Array.isArray(data.clans)) setClans(data.clans);
         }
       } catch {
-        // Offline / server unreachable graceful fallback
+        // Server sync retry
       }
 
       updateProfile((prev) => {
@@ -221,9 +295,16 @@ export default function App() {
       onMultiplayerHit: (targetId, headshot) => {
         mpClient.sendHit(targetId, headshot);
       },
+      onMultiplayerGrenadeThrow: (origin, velocity) => {
+        mpClient.sendGrenadeThrow(origin, velocity);
+      },
+      onMultiplayerGrenadeDamage: (targetId, damage) => {
+        mpClient.sendGrenadeDamage(targetId, damage);
+      },
     });
 
     engineRef.current = engine;
+    engine.setTouchDevice(isTouchDevice);
     engine.setIdentity(
       profileRef.current.id,
       profileRef.current.name,
@@ -257,7 +338,6 @@ export default function App() {
     );
     const unsubVoice = voiceChat.subscribe(setVoice);
 
-    // Initial REST fetch so data shows immediately even before WS connects
     fetch('/api/leaderboard')
       .then((r) => r.json())
       .then((data) => {
@@ -314,8 +394,11 @@ export default function App() {
         case 'player:fired':
           engineRef.current?.handleRemoteFired(ev.origin, ev.hitPoint, ev.tracer);
           break;
+        case 'grenade:thrown':
+          engineRef.current?.handleRemoteGrenadeThrown(ev.ownerId, ev.ownerName, ev.origin, ev.velocity);
+          break;
         case 'player:damaged':
-          engineRef.current?.handleRemoteDamaged(ev.targetId, ev.hp, ev.headshot);
+          engineRef.current?.handleRemoteDamaged(ev.targetId, ev.hp, ev.headshot, ev.explosive);
           break;
         case 'player:killed':
           engineRef.current?.handleRemoteKilled(
@@ -356,10 +439,12 @@ export default function App() {
     };
   }, []);
 
-  const startOffline = (difficulty: BotDifficulty) => {
+  const startSoloBots = (difficulty: BotDifficulty) => {
+    if (!browserOnline) return;
+    if (isTouchDevice) requestFullscreenLandscape();
     setLastDifficulty(difficulty);
-    setMatchMode('offline');
-    setRoomCode('OFFLINE');
+    setMatchMode('solo');
+    setRoomCode('ARENA-BOTS');
     setMatchSummary(null);
     setPaused(false);
     setChatOpen(false);
@@ -369,16 +454,18 @@ export default function App() {
         senderId: 'system',
         senderName: 'ARENA',
         clanTag: '',
-        text: `Partida Offline (${difficulty}) iniciada. ¡Elimina a los 5 bots tácticos!`,
+        text: `Arena con Bots (${difficulty}) iniciada. ¡Los bots también combaten entre sí y usan granadas!`,
         timestamp: Date.now(),
         channel: 'system',
       },
     ]);
     setScreen('playing');
-    engineRef.current?.startOfflineMatch(difficulty);
+    engineRef.current?.startSoloBotMatch(difficulty);
   };
 
   const joinMultiplayer = (code: string, isPrivate: boolean) => {
+    if (!browserOnline) return;
+    if (isTouchDevice) requestFullscreenLandscape();
     mpClient.joinRoom({
       roomCode: code,
       isPrivate,
@@ -569,9 +656,14 @@ export default function App() {
       {screen === 'title' && (
         <TitleScreen
           playerName={profile.name}
+          isTouchDevice={isTouchDevice}
           onNameChange={(name) => updateProfile((p) => ({ ...p, name }))}
-          onEnterMenu={() => setScreen('hub')}
-          onQuickPlayOffline={() => startOffline('veterano')}
+          onEnterMenu={() => {
+            if (isTouchDevice) requestFullscreenLandscape();
+            setScreen('hub');
+          }}
+          onQuickPlayBots={() => startSoloBots('veterano')}
+          onRequestFullscreenLandscape={requestFullscreenLandscape}
         />
       )}
 
@@ -591,7 +683,7 @@ export default function App() {
           onNameChange={(name) => updateProfile((p) => ({ ...p, name }))}
           onToggleMuteAudio={() => updateProfile((p) => ({ ...p, mutedAudio: !p.mutedAudio }))}
           onToggleMic={() => voiceChat.toggle()}
-          onStartOffline={startOffline}
+          onStartOffline={startSoloBots}
           onJoinMultiplayer={joinMultiplayer}
           onSendGlobalChat={(text) => mpClient.sendChat('global', profile.name, profile.clanTag, text)}
           onBuyOrEquipItem={handleBuyOrEquipItem}
@@ -616,7 +708,9 @@ export default function App() {
           voice={voice}
           sensitivity={profile.sensitivity}
           mutedAudio={profile.mutedAudio}
+          isTouchDevice={isTouchDevice}
           onRequestPointerLock={() => engineRef.current?.requestPointerLock()}
+          onRequestFullscreenLandscape={requestFullscreenLandscape}
           onResume={() => {
             setPaused((p) => {
               const next = !p;
@@ -632,9 +726,22 @@ export default function App() {
             engineRef.current?.setChatOpen(false);
             engineRef.current?.requestPointerLock();
           }}
+          onToggleChat={() => {
+            setChatOpen((prev) => {
+              const next = !prev;
+              engineRef.current?.setChatOpen(next);
+              return next;
+            });
+          }}
           onToggleMic={() => voiceChat.toggle()}
           onSensitivityChange={(val) => updateProfile((p) => ({ ...p, sensitivity: val }))}
           onToggleMuteAudio={() => updateProfile((p) => ({ ...p, mutedAudio: !p.mutedAudio }))}
+          onTouchMove={(x, y) => engineRef.current?.setTouchMove(x, y)}
+          onTouchLook={(dx, dy) => engineRef.current?.applyTouchLook(dx, dy)}
+          onTouchFiring={(firing) => engineRef.current?.setTouchFiring(firing)}
+          onTouchJump={() => engineRef.current?.triggerJump()}
+          onTouchReload={() => engineRef.current?.triggerReload()}
+          onTouchGrenade={() => engineRef.current?.triggerGrenade()}
         />
       )}
 
@@ -645,14 +752,51 @@ export default function App() {
           playerName={profile.name}
           clanTag={profile.clanTag}
           onPlayAgain={() => {
-            if (matchMode === 'offline') {
-              startOffline(lastDifficulty);
+            if (matchMode === 'solo') {
+              startSoloBots(lastDifficulty);
             } else {
               joinMultiplayer(roomCode, roomCode !== 'PUBLIC-1');
             }
           }}
           onBackToMenu={exitToMenu}
         />
+      )}
+
+      {/* Android Portrait-to-Horizontal Fullscreen Prompt */}
+      {isTouchDevice && isPortrait && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-[#080b10]/96 p-6 text-center">
+          <div className="max-w-sm rounded-xl bg-[#111722] border border-amber-500/50 p-6">
+            <RotateCw className="w-10 h-10 text-amber-400 mx-auto mb-3" />
+            <h2 className="font-display text-2xl font-bold text-white mb-2">
+              Modo Horizontal Requerido
+            </h2>
+            <p className="text-sm text-slate-300 mb-5">
+              Para jugar BATTLEPLAYERS en Android a pantalla completa, gira tu teléfono en horizontal.
+            </p>
+            <button
+              onClick={requestFullscreenLandscape}
+              className="w-full flex items-center justify-center gap-2 py-3 rounded-lg bg-amber-500 hover:bg-amber-400 text-slate-950 font-display font-bold text-sm cursor-pointer"
+            >
+              <Maximize2 className="w-4 h-4" />
+              Activar Pantalla Completa Horizontal
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Online-Required Internet Connection Guard */}
+      {!browserOnline && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-[#070a0f]/95 p-6 text-center">
+          <div className="max-w-md rounded-xl bg-[#111722] border border-red-500/60 p-6">
+            <WifiOff className="w-10 h-10 text-red-400 mx-auto mb-3" />
+            <h2 className="font-display text-2xl font-bold text-white mb-2">
+              Conexión a Internet Requerida
+            </h2>
+            <p className="text-sm text-slate-300">
+              BATTLEPLAYERS funciona exclusivamente con Internet para sincronizar partidas, bots, chat de voz, clanes y clasificación global. Reconectando...
+            </p>
+          </div>
+        </div>
       )}
     </div>
   );

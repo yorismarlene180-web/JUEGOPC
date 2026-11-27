@@ -101,7 +101,7 @@ export interface KillFeedEvent {
 }
 
 export interface MatchSummary {
-  mode: 'offline' | 'multiplayer';
+  mode: 'solo' | 'multiplayer';
   roomCode: string;
   won: boolean;
   placement: number;

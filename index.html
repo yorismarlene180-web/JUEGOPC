@@ -2,9 +2,29 @@
 <html lang="es">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>BATTLEPLAYERS — Arena Táctica 3D para PC</title>
-    <meta name="description" content="Juego de disparos 3D táctico para Windows PC con bots offline, multijugador en tiempo real, chat con micrófono, tienda de avatar, clanes y clasificación global." />
+    <script>
+      window.addEventListener(
+        'error',
+        function (ev) {
+          var src = ev && ev.filename ? String(ev.filename) : '';
+          var msg = ev && ev.message ? String(ev.message) : '';
+          if (
+            /^(chrome|moz|safari-web)-extension:\/\//i.test(src) ||
+            msg.indexOf('Cannot set property fetch of #<Window>') !== -1
+          ) {
+            ev.preventDefault();
+            ev.stopImmediatePropagation();
+          }
+        },
+        true
+      );
+    </script>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="theme-color" content="#0a0d12" />
+    <title>BATTLEPLAYERS — Arena Táctica 3D en Línea</title>
+    <meta name="description" content="Juego de disparos 3D táctico en línea para PC y Android horizontal con bots inteligentes, granadas de fragmentación, multijugador en tiempo real, chat con micrófono, clanes y clasificación global." />
     <meta property="og:title" content="BATTLEPLAYERS — Arena Táctica 3D para PC" />
     <meta property="og:description" content="Compite en partidas 3D tácticas offline o multijugador con chat de voz, clanes, recompensas diarias y clasificación en tiempo real." />
     <meta property="og:type" content="website" />
