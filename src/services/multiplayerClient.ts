@@ -2,7 +2,9 @@ import type {
   AvatarLoadout,
   ChatMessage,
   ClanInfo,
+  FriendInfo,
   LeaderboardEntry,
+  RoomInvite,
   RoomPlayerState,
 } from '../types/game';
 
@@ -43,7 +45,11 @@ export type ServerEvent =
   | { type: 'match:ended'; winnerName: string }
   | { type: 'chat:message'; message: ChatMessage }
   | { type: 'voice:speaking'; playerId: string; speaking: boolean }
-  | { type: 'voice:audio'; fromId: string; data: string };
+  | { type: 'voice:audio'; fromId: string; data: string }
+  | { type: 'friends:sync'; friends: FriendInfo[] }
+  | { type: 'invite:received'; invite: RoomInvite }
+  | { type: 'invite:sent'; toPlayerId: string; toName: string; roomCode: string }
+  | { type: 'invite:error'; message: string };
 
 type EventHandler = (event: ServerEvent) => void;
 
@@ -52,6 +58,14 @@ export class MultiplayerClient {
   private listeners = new Set<EventHandler>();
   private reconnectTimer = 0;
   private closedManually = false;
+  private lastPresence: {
+    playerId: string;
+    name: string;
+    clanTag: string;
+    status: 'online' | 'in_match';
+    roomCode: string | null;
+    isPrivateRoom: boolean;
+  } | null = null;
 
   public connect() {
     if (this.ws && (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING)) {
@@ -64,6 +78,9 @@ export class MultiplayerClient {
     this.ws = ws;
 
     ws.onopen = () => {
+      if (this.lastPresence) {
+        this.send({ type: 'presence:register', ...this.lastPresence });
+      }
       this.emit({ type: 'connected' });
     };
 
@@ -157,6 +174,35 @@ export class MultiplayerClient {
 
   public sendVoiceAudio(data: string) {
     this.send({ type: 'voice:audio', data });
+  }
+
+  public registerPresence(params: {
+    playerId: string;
+    name: string;
+    clanTag: string;
+    status: 'online' | 'in_match';
+    roomCode: string | null;
+    isPrivateRoom: boolean;
+  }) {
+    this.lastPresence = params;
+    this.send({ type: 'presence:register', ...params });
+  }
+
+  public updatePresenceStatus(status: 'online' | 'in_match', roomCode: string | null, isPrivateRoom: boolean) {
+    if (this.lastPresence) {
+      this.lastPresence = { ...this.lastPresence, status, roomCode, isPrivateRoom };
+    }
+    this.send({ type: 'presence:status', status, roomCode, isPrivateRoom });
+  }
+
+  public sendRoomInvite(params: {
+    toPlayerId: string;
+    roomCode: string;
+    isPrivate: boolean;
+    fromName: string;
+    fromClanTag: string;
+  }) {
+    this.send({ type: 'invite:send', ...params });
   }
 }
 

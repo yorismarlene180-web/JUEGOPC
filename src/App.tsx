@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Maximize2, RotateCw, WifiOff } from 'lucide-react';
+import { Check, Maximize2, RotateCw, UserPlus, WifiOff, X } from 'lucide-react';
 import { soundEngine } from './audio/soundEngine';
 import { voiceChat, type VoiceStatus } from './audio/voiceChat';
 import { GameHUD } from './components/GameHUD';
@@ -13,9 +13,11 @@ import { calcLevel, getTodayKey, loadProfile, saveProfile } from './services/pro
 import type {
   ChatMessage,
   ClanInfo,
+  FriendInfo,
   LeaderboardEntry,
   MatchSummary,
   PlayerProfile,
+  RoomInvite,
 } from './types/game';
 
 type ScreenState = 'title' | 'hub' | 'playing';
@@ -88,6 +90,9 @@ export default function App() {
   const [rooms, setRooms] = useState<RoomSummary[]>([]);
   const [globalChat, setGlobalChat] = useState<ChatMessage[]>([]);
   const [roomChat, setRoomChat] = useState<ChatMessage[]>([]);
+  const [friends, setFriends] = useState<FriendInfo[]>([]);
+  const [pendingInvites, setPendingInvites] = useState<RoomInvite[]>([]);
+  const [inviteNotice, setInviteNotice] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
   const [voice, setVoice] = useState<VoiceStatus>(() => voiceChat.getStatus());
 
   const updateProfile = useCallback((updater: (prev: PlayerProfile) => PlayerProfile) => {
@@ -347,7 +352,23 @@ export default function App() {
       })
       .catch(() => {});
 
+    fetch(`/api/friends/${encodeURIComponent(profileRef.current.id)}`)
+      .then((r) => r.json())
+      .then((data) => {
+        if (Array.isArray(data.friends)) setFriends(data.friends);
+      })
+      .catch(() => {});
+
     mpClient.connect();
+    mpClient.registerPresence({
+      playerId: profileRef.current.id,
+      name: profileRef.current.name,
+      clanTag: profileRef.current.clanTag,
+      status: 'online',
+      roomCode: null,
+      isPrivateRoom: false,
+    });
+
     const unsubMp = mpClient.subscribe((ev: ServerEvent) => {
       switch (ev.type) {
         case 'connected':
@@ -371,6 +392,27 @@ export default function App() {
           break;
         case 'rooms:sync':
           setRooms(ev.rooms);
+          break;
+        case 'friends:sync':
+          setFriends(ev.friends);
+          break;
+        case 'invite:received':
+          soundEngine.playReward();
+          setPendingInvites((prev) => {
+            if (prev.some((i) => i.id === ev.invite.id)) return prev;
+            return [ev.invite, ...prev].slice(0, 6);
+          });
+          break;
+        case 'invite:sent':
+          setInviteNotice({
+            type: 'success',
+            text: `Invitación enviada a ${ev.toName} para la sala ${ev.roomCode}.`,
+          });
+          setTimeout(() => setInviteNotice(null), 4000);
+          break;
+        case 'invite:error':
+          setInviteNotice({ type: 'error', text: ev.message });
+          setTimeout(() => setInviteNotice(null), 4000);
           break;
         case 'room:joined':
           setMatchMode('multiplayer');
@@ -439,6 +481,19 @@ export default function App() {
     };
   }, []);
 
+  // Keep server presence synchronized when profile identity or match state changes
+  useEffect(() => {
+    const inMatch = screen === 'playing';
+    mpClient.registerPresence({
+      playerId: profile.id,
+      name: profile.name,
+      clanTag: profile.clanTag,
+      status: inMatch ? 'in_match' : 'online',
+      roomCode: inMatch ? roomCode : null,
+      isPrivateRoom: inMatch && matchMode === 'multiplayer' && roomCode !== 'PUBLIC-1',
+    });
+  }, [profile.id, profile.name, profile.clanTag, screen, roomCode, matchMode]);
+
   const startSoloBots = (difficulty: BotDifficulty) => {
     if (!browserOnline) return;
     if (isTouchDevice) requestFullscreenLandscape();
@@ -479,6 +534,8 @@ export default function App() {
   const exitToMenu = () => {
     if (matchMode === 'multiplayer') {
       mpClient.leaveRoom();
+    } else {
+      mpClient.updatePresenceStatus('online', null, false);
     }
     setPaused(false);
     setChatOpen(false);
@@ -486,6 +543,72 @@ export default function App() {
     engineRef.current?.setPaused(false);
     engineRef.current?.exitPointerLock();
     setScreen('hub');
+  };
+
+  const handleAddFriend = async (targetId: string): Promise<{ ok: boolean; message: string }> => {
+    try {
+      const res = await fetch('/api/friends/add', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          playerId: profile.id,
+          targetId,
+          playerName: profile.name,
+          clanTag: profile.clanTag,
+        }),
+      });
+      const json = await res.json();
+      if (!res.ok) {
+        return { ok: false, message: json.error || 'No se pudo añadir al jugador.' };
+      }
+      if (Array.isArray(json.friends)) setFriends(json.friends);
+      soundEngine.playReward();
+      return {
+        ok: true,
+        message: `${json.added?.name || targetId} añadido a tu lista de amigos.`,
+      };
+    } catch {
+      return { ok: false, message: 'Error de conexión con el servidor.' };
+    }
+  };
+
+  const handleRemoveFriend = async (targetId: string) => {
+    try {
+      const res = await fetch('/api/friends/remove', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ playerId: profile.id, targetId }),
+      });
+      const json = await res.json();
+      if (res.ok && Array.isArray(json.friends)) {
+        setFriends(json.friends);
+      }
+    } catch {
+      // ignore
+    }
+  };
+
+  const handleSendInvite = (toPlayerId: string, targetRoomCode: string, isPrivate: boolean) => {
+    mpClient.sendRoomInvite({
+      toPlayerId,
+      roomCode: targetRoomCode,
+      isPrivate,
+      fromName: profile.name,
+      fromClanTag: profile.clanTag,
+    });
+  };
+
+  const handleAcceptInvite = (invite: RoomInvite) => {
+    setPendingInvites((prev) => prev.filter((i) => i.id !== invite.id));
+    setPaused(false);
+    setChatOpen(false);
+    setMatchSummary(null);
+    engineRef.current?.setPaused(false);
+    joinMultiplayer(invite.roomCode, invite.isPrivate);
+  };
+
+  const handleDismissInvite = (inviteId: string) => {
+    setPendingInvites((prev) => prev.filter((i) => i.id !== inviteId));
   };
 
   const handleSendMatchChat = (text: string) => {
@@ -678,6 +801,9 @@ export default function App() {
           clans={clans}
           rooms={rooms}
           globalChat={globalChat}
+          friends={friends}
+          pendingInvites={pendingInvites}
+          inviteNotice={inviteNotice}
           voice={voice}
           canClaimDaily={canClaimDaily}
           onNameChange={(name) => updateProfile((p) => ({ ...p, name }))}
@@ -692,6 +818,11 @@ export default function App() {
           onCreateClan={handleCreateClan}
           onJoinClan={handleJoinClan}
           onLeaveClan={handleLeaveClan}
+          onAddFriend={handleAddFriend}
+          onRemoveFriend={handleRemoveFriend}
+          onSendInvite={handleSendInvite}
+          onAcceptInvite={handleAcceptInvite}
+          onDismissInvite={handleDismissInvite}
         />
       )}
 
@@ -779,6 +910,49 @@ export default function App() {
             >
               <Maximize2 className="w-4 h-4" />
               Activar Pantalla Completa Horizontal
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Floating Real-Time Room Invite Toast */}
+      {pendingInvites.length > 0 && browserOnline && (
+        <div className="fixed bottom-4 right-4 z-40 max-w-sm w-[calc(100%-2rem)] rounded-xl bg-[#0e1420]/96 border border-amber-500/70 p-4 shadow-2xl">
+          <div className="flex items-start justify-between gap-3">
+            <div className="flex items-start gap-2.5 min-w-0">
+              <UserPlus className="w-5 h-5 text-amber-400 shrink-0 mt-0.5" />
+              <div className="min-w-0">
+                <div className="text-xs font-bold text-amber-300">Invitación a Sala de Juego</div>
+                <div className="text-sm font-semibold text-white truncate">
+                  {pendingInvites[0].fromClanTag ? `[${pendingInvites[0].fromClanTag}] ` : ''}
+                  {pendingInvites[0].fromName}
+                </div>
+                <div className="text-xs text-slate-300">
+                  Sala <span className="font-mono-num font-bold text-amber-400">{pendingInvites[0].roomCode}</span>
+                </div>
+              </div>
+            </div>
+            <button
+              onClick={() => handleDismissInvite(pendingInvites[0].id)}
+              title="Cerrar invitación"
+              className="p-1 text-slate-400 hover:text-white cursor-pointer"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+          <div className="flex items-center gap-2 mt-3">
+            <button
+              onClick={() => handleAcceptInvite(pendingInvites[0])}
+              className="flex-1 flex items-center justify-center gap-1.5 py-2 rounded-lg bg-amber-500 hover:bg-amber-400 text-slate-950 font-display font-bold text-xs cursor-pointer"
+            >
+              <Check className="w-3.5 h-3.5" />
+              Unirse a la Sala
+            </button>
+            <button
+              onClick={() => handleDismissInvite(pendingInvites[0].id)}
+              className="px-3 py-2 rounded-lg bg-[#1a2232] hover:bg-[#253149] border border-slate-700 text-xs text-slate-300 cursor-pointer"
+            >
+              Luego
             </button>
           </div>
         </div>

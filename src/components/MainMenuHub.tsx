@@ -15,7 +15,9 @@ import {
   Send,
   Shield,
   ShoppingBag,
+  Trash2,
   Trophy,
+  UserPlus,
   Users,
   Volume2,
   VolumeX,
@@ -28,11 +30,13 @@ import type {
   AccessoryCategory,
   ChatMessage,
   ClanInfo,
+  FriendInfo,
   LeaderboardEntry,
   PlayerProfile,
+  RoomInvite,
 } from '../types/game';
 
-export type HubTab = 'play' | 'shop' | 'challenges' | 'clans' | 'leaderboard';
+export type HubTab = 'play' | 'friends' | 'shop' | 'challenges' | 'clans' | 'leaderboard';
 
 interface MainMenuHubProps {
   activeTab: HubTab;
@@ -43,6 +47,9 @@ interface MainMenuHubProps {
   clans: ClanInfo[];
   rooms: RoomSummary[];
   globalChat: ChatMessage[];
+  friends: FriendInfo[];
+  pendingInvites: RoomInvite[];
+  inviteNotice: { type: 'success' | 'error'; text: string } | null;
   voice: VoiceStatus;
   canClaimDaily: boolean;
   onNameChange: (name: string) => void;
@@ -57,6 +64,11 @@ interface MainMenuHubProps {
   onCreateClan: (data: { tag: string; name: string; description: string; color: string }) => Promise<string | null>;
   onJoinClan: (clanId: string) => Promise<void>;
   onLeaveClan: () => Promise<void>;
+  onAddFriend: (targetId: string) => Promise<{ ok: boolean; message: string }>;
+  onRemoveFriend: (targetId: string) => Promise<void>;
+  onSendInvite: (toPlayerId: string, roomCode: string, isPrivate: boolean) => void;
+  onAcceptInvite: (invite: RoomInvite) => void;
+  onDismissInvite: (inviteId: string) => void;
 }
 
 const SHOP_CATEGORIES: Array<{ id: AccessoryCategory; label: string }> = [
@@ -76,6 +88,9 @@ export const MainMenuHub: React.FC<MainMenuHubProps> = ({
   clans,
   rooms,
   globalChat,
+  friends,
+  pendingInvites,
+  inviteNotice,
   voice,
   canClaimDaily,
   onNameChange,
@@ -90,13 +105,27 @@ export const MainMenuHub: React.FC<MainMenuHubProps> = ({
   onCreateClan,
   onJoinClan,
   onLeaveClan,
+  onAddFriend,
+  onRemoveFriend,
+  onSendInvite,
+  onAcceptInvite,
+  onDismissInvite,
 }) => {
   const [difficulty, setDifficulty] = useState<BotDifficulty>('veterano');
   const [joinCode, setJoinCode] = useState('');
   const [privateCode, setPrivateCode] = useState(() => `BP-${Math.floor(1000 + Math.random() * 8999)}`);
   const [copiedCode, setCopiedCode] = useState(false);
+  const [copiedId, setCopiedId] = useState(false);
   const [chatDraft, setChatDraft] = useState('');
   const [shopCat, setShopCat] = useState<AccessoryCategory>('helmet');
+
+  // Friends state
+  const [friendIdInput, setFriendIdInput] = useState('');
+  const [friendFilter, setFriendFilter] = useState<'all' | 'online' | 'offline'>('all');
+  const [friendFeedback, setFriendFeedback] = useState<{ ok: boolean; text: string } | null>(null);
+  const [addingFriend, setAddingFriend] = useState(false);
+  const [inviteTargetMode, setInviteTargetMode] = useState<'private' | 'public'>('private');
+  const [recentlyInvitedIds, setRecentlyInvitedIds] = useState<Record<string, boolean>>({});
 
   // Create Clan form
   const [clanTag, setClanTag] = useState('');
@@ -106,6 +135,9 @@ export const MainMenuHub: React.FC<MainMenuHubProps> = ({
   const [clanError, setClanError] = useState<string | null>(null);
 
   const myClan = clans.find((c) => c.id === profile.clanId) || null;
+  const onlineFriends = friends.filter((f) => f.status !== 'offline');
+  const activeInviteRoom = inviteTargetMode === 'private' ? privateCode : 'PUBLIC-1';
+  const activeInviteIsPrivate = inviteTargetMode === 'private';
 
   const handleCopyCode = async () => {
     try {
@@ -115,6 +147,41 @@ export const MainMenuHub: React.FC<MainMenuHubProps> = ({
     } catch {
       // ignore
     }
+  };
+
+  const handleCopyPlayerId = async () => {
+    try {
+      await navigator.clipboard.writeText(profile.id);
+      setCopiedId(true);
+      setTimeout(() => setCopiedId(false), 2000);
+    } catch {
+      // ignore
+    }
+  };
+
+  const handleAddFriendSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const trimmed = friendIdInput.trim();
+    if (!trimmed) return;
+    setAddingFriend(true);
+    const res = await onAddFriend(trimmed);
+    setAddingFriend(false);
+    setFriendFeedback({ ok: res.ok, text: res.message });
+    if (res.ok) setFriendIdInput('');
+  };
+
+  const handleQuickInvite = (friendId: string, roomOverride?: { code: string; isPrivate: boolean }) => {
+    const code = roomOverride?.code ?? activeInviteRoom;
+    const isPriv = roomOverride?.isPrivate ?? activeInviteIsPrivate;
+    onSendInvite(friendId, code, isPriv);
+    setRecentlyInvitedIds((prev) => ({ ...prev, [friendId]: true }));
+    setTimeout(() => {
+      setRecentlyInvitedIds((prev) => {
+        const next = { ...prev };
+        delete next[friendId];
+        return next;
+      });
+    }, 3000);
   };
 
   const handleGlobalChatSubmit = (e: React.FormEvent) => {
@@ -158,9 +225,10 @@ export const MainMenuHub: React.FC<MainMenuHubProps> = ({
         </div>
 
         {/* Zone 2: Concise single-line navigation tabs */}
-        <nav className="flex items-center gap-6 overflow-x-auto">
+        <nav className="flex items-center gap-5 overflow-x-auto">
           {[
             { id: 'play' as HubTab, label: 'Jugar', icon: Crosshair },
+            { id: 'friends' as HubTab, label: 'Amigos', icon: UserPlus },
             { id: 'shop' as HubTab, label: 'Tienda', icon: ShoppingBag },
             { id: 'challenges' as HubTab, label: 'Desafíos', icon: Calendar },
             { id: 'clans' as HubTab, label: 'Clanes', icon: Shield },
@@ -178,6 +246,11 @@ export const MainMenuHub: React.FC<MainMenuHubProps> = ({
               >
                 <Icon className="w-4 h-4" />
                 <span>{tab.label}</span>
+                {tab.id === 'friends' && (pendingInvites.length > 0 || onlineFriends.length > 0) && (
+                  <span className={`text-[11px] font-mono-num font-bold ${pendingInvites.length > 0 ? 'text-amber-300' : 'text-emerald-400'}`}>
+                    ({pendingInvites.length > 0 ? `${pendingInvites.length} inv.` : onlineFriends.length})
+                  </span>
+                )}
                 {tab.id === 'challenges' && canClaimDaily && (
                   <span className="text-[11px] font-bold text-emerald-400">(1)</span>
                 )}
@@ -215,8 +288,20 @@ export const MainMenuHub: React.FC<MainMenuHubProps> = ({
               {/* Player Callsign Quick Bar */}
               <div className="rounded-xl bg-[#0b0f17]/95 border border-slate-800 p-5 flex flex-wrap items-center justify-between gap-4">
                 <div>
-                  <div className="text-xs text-slate-400">Operador Windows PC · {profile.clanTag ? `Clan [${profile.clanTag}]` : 'Sin Clan'}</div>
-                  <div className="flex items-center gap-3 mt-1">
+                  <div className="flex flex-wrap items-center gap-2 text-xs text-slate-400">
+                    <span>{profile.clanTag ? `Clan [${profile.clanTag}]` : 'Sin Clan'}</span>
+                    <span aria-hidden="true">·</span>
+                    <span>ID:</span>
+                    <button
+                      onClick={handleCopyPlayerId}
+                      title="Copiar tu ID para que tus amigos te añadan"
+                      className="inline-flex items-center gap-1 font-mono-num text-amber-300 hover:text-amber-200 cursor-pointer"
+                    >
+                      <span>{profile.id}</span>
+                      {copiedId ? <Check className="w-3 h-3 text-emerald-400" /> : <Copy className="w-3 h-3" />}
+                    </button>
+                  </div>
+                  <div className="flex items-center gap-3 mt-1.5">
                     <input
                       type="text"
                       maxLength={20}
@@ -352,8 +437,76 @@ export const MainMenuHub: React.FC<MainMenuHubProps> = ({
               </div>
             </div>
 
-            {/* Right 4 cols: Active Rooms & Global Lobby Chat */}
-            <div className="lg:col-span-4 flex flex-col gap-5">
+            {/* Right 4 cols: Online Friends Quick Invite, Active Rooms & Global Lobby Chat */}
+            <div className="lg:col-span-4 flex flex-col gap-4">
+              {/* Quick Online Friends Card */}
+              <div className="rounded-xl bg-[#0b0f17]/95 border border-slate-800 p-4">
+                <div className="flex items-center justify-between mb-2.5">
+                  <span className="text-xs font-semibold text-white">
+                    Amigos en Línea ({onlineFriends.length})
+                  </span>
+                  <button
+                    onClick={() => onTabChange('friends')}
+                    className="text-xs font-semibold text-amber-400 hover:text-amber-300 cursor-pointer"
+                  >
+                    Gestionar
+                  </button>
+                </div>
+                {onlineFriends.length === 0 ? (
+                  <div className="text-xs text-slate-400 py-1">
+                    {friends.length === 0
+                      ? 'Sin amigos añadidos aún. Añádelos por ID en la pestaña Amigos.'
+                      : 'Ningún amigo conectado ahora mismo.'}
+                  </div>
+                ) : (
+                  <div className="space-y-2 max-h-28 overflow-y-auto">
+                    {onlineFriends.slice(0, 4).map((f) => {
+                      const invited = Boolean(recentlyInvitedIds[f.id]);
+                      const joinableRoom = f.status === 'in_match' && f.roomCode && f.roomCode !== 'ARENA-BOTS';
+                      return (
+                        <div
+                          key={f.id}
+                          className="flex items-center justify-between gap-2 px-3 py-2 rounded-lg bg-[#131926] border border-slate-800 text-xs"
+                        >
+                          <div className="min-w-0">
+                            <div className="font-semibold text-white truncate">
+                              {f.clanTag ? `[${f.clanTag}] ` : ''}{f.name}
+                            </div>
+                            <div className={`text-[11px] truncate ${f.status === 'in_match' ? 'text-sky-400' : 'text-emerald-400'}`}>
+                              {f.status === 'in_match'
+                                ? f.roomCode === 'ARENA-BOTS'
+                                  ? 'En Arena Bots'
+                                  : `En sala ${f.roomCode}`
+                                : 'En línea'}
+                            </div>
+                          </div>
+                          <div className="flex items-center gap-1.5 shrink-0">
+                            {joinableRoom && f.roomCode && (
+                              <button
+                                onClick={() => onJoinMultiplayer(f.roomCode!, f.isPrivateRoom)}
+                                className="px-2.5 py-1 rounded bg-sky-500/20 hover:bg-sky-500/30 border border-sky-500/40 text-sky-300 font-semibold cursor-pointer"
+                              >
+                                Unirse
+                              </button>
+                            )}
+                            <button
+                              onClick={() => handleQuickInvite(f.id, { code: privateCode, isPrivate: true })}
+                              className={`px-2.5 py-1 rounded font-semibold cursor-pointer ${
+                                invited
+                                  ? 'bg-emerald-500/20 border border-emerald-500/40 text-emerald-300'
+                                  : 'bg-amber-500 hover:bg-amber-400 text-slate-950'
+                              }`}
+                            >
+                              {invited ? 'Enviada' : 'Invitar'}
+                            </button>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+
               <div className="rounded-xl bg-[#0b0f17]/95 border border-slate-800 p-4">
                 <div className="flex items-center justify-between mb-3">
                   <span className="text-xs font-semibold text-white">Salas Activas</span>
@@ -361,7 +514,7 @@ export const MainMenuHub: React.FC<MainMenuHubProps> = ({
                     {wsConnected ? 'Conectado' : 'Reconectando...'}
                   </span>
                 </div>
-                <div className="space-y-2 max-h-32 overflow-y-auto">
+                <div className="space-y-2 max-h-28 overflow-y-auto">
                   {rooms.map((r) => (
                     <div
                       key={r.code}
@@ -383,12 +536,12 @@ export const MainMenuHub: React.FC<MainMenuHubProps> = ({
               </div>
 
               {/* Global Lobby Chat */}
-              <div className="rounded-xl bg-[#0b0f17]/95 border border-slate-800 p-4 flex-1 flex flex-col min-h-[260px]">
+              <div className="rounded-xl bg-[#0b0f17]/95 border border-slate-800 p-4 flex-1 flex flex-col min-h-[220px]">
                 <div className="flex items-center gap-2 text-xs font-semibold text-white mb-3">
                   <MessageSquare className="w-4 h-4 text-amber-400" />
                   Chat Global de Jugadores
                 </div>
-                <div className="flex-1 overflow-y-auto space-y-2 text-xs mb-3 max-h-56 pr-1">
+                <div className="flex-1 overflow-y-auto space-y-2 text-xs mb-3 max-h-48 pr-1">
                   {globalChat.map((m) => (
                     <div key={m.id} className="leading-relaxed">
                       <span className="font-semibold text-amber-300">
@@ -414,6 +567,296 @@ export const MainMenuHub: React.FC<MainMenuHubProps> = ({
                     <Send className="w-4 h-4" />
                   </button>
                 </form>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* FRIENDS MANAGEMENT TAB */}
+        {activeTab === 'friends' && (
+          <div className="max-w-6xl mx-auto grid grid-cols-1 lg:grid-cols-12 gap-6 pointer-events-auto">
+            {/* Left 5 cols: Your ID, Add Friend by ID, Quick Room Invite Target */}
+            <div className="lg:col-span-5 space-y-5">
+              {/* Your Operator ID Card */}
+              <div className="rounded-xl bg-[#0b0f17]/95 border border-slate-800 p-5">
+                <div className="text-xs text-slate-400 mb-1">Tu ID de Operador</div>
+                <div className="flex items-center justify-between gap-3">
+                  <span className="font-mono-num text-lg font-bold text-amber-400 truncate">
+                    {profile.id}
+                  </span>
+                  <button
+                    onClick={handleCopyPlayerId}
+                    className="flex items-center gap-1.5 px-3 py-2 rounded-lg bg-[#182132] hover:bg-[#222f46] border border-slate-700 text-xs font-semibold text-white cursor-pointer whitespace-nowrap shrink-0"
+                  >
+                    {copiedId ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
+                    {copiedId ? 'ID Copiado' : 'Copiar ID'}
+                  </button>
+                </div>
+                <p className="text-xs text-slate-400 mt-2">
+                  Comparte este ID con tus amigos para que te agreguen y vean tu estado de conexión en tiempo real.
+                </p>
+              </div>
+
+              {/* Add Friend by ID Form */}
+              <form
+                onSubmit={handleAddFriendSubmit}
+                className="rounded-xl bg-[#0b0f17]/95 border border-slate-800 p-5 space-y-3"
+              >
+                <div className="flex items-center gap-2">
+                  <UserPlus className="w-5 h-5 text-amber-400" />
+                  <h2 className="font-display text-xl font-bold text-white">Añadir Jugador por ID</h2>
+                </div>
+                <p className="text-xs text-slate-400">
+                  Ingresa el ID de otro operador conectado o registrado en BATTLEPLAYERS.
+                </p>
+                <div className="flex gap-2">
+                  <input
+                    type="text"
+                    maxLength={40}
+                    value={friendIdInput}
+                    onChange={(e) => setFriendIdInput(e.target.value)}
+                    placeholder="Ej. op_a1b2c3d4"
+                    className="flex-1 px-3 py-2.5 rounded-lg bg-[#141b27] border border-slate-700 text-sm text-white font-mono-num focus:outline-none focus:border-amber-500"
+                  />
+                  <button
+                    type="submit"
+                    disabled={addingFriend || !friendIdInput.trim()}
+                    className="px-4 py-2.5 rounded-lg bg-amber-500 hover:bg-amber-400 disabled:bg-slate-800 disabled:text-slate-500 text-slate-950 font-display font-bold text-sm cursor-pointer whitespace-nowrap shrink-0"
+                  >
+                    {addingFriend ? 'Buscando...' : 'Añadir'}
+                  </button>
+                </div>
+                {friendFeedback && (
+                  <div className={`text-xs font-medium ${friendFeedback.ok ? 'text-emerald-400' : 'text-red-400'}`}>
+                    {friendFeedback.text}
+                  </div>
+                )}
+              </form>
+
+              {/* Quick Invite Target Room Card */}
+              <div className="rounded-xl bg-[#0b0f17]/95 border border-slate-800 p-5 space-y-3">
+                <div className="flex items-center justify-between">
+                  <h3 className="font-display text-lg font-bold text-white">Sala para Invitaciones Rápidas</h3>
+                  <span className="font-mono-num text-xs font-bold text-sky-400">{activeInviteRoom}</span>
+                </div>
+                <div className="grid grid-cols-2 gap-2 p-1 rounded-lg bg-[#131926]">
+                  <button
+                    type="button"
+                    onClick={() => setInviteTargetMode('private')}
+                    className={`py-2 px-3 rounded-md text-xs font-semibold cursor-pointer transition-colors ${
+                      inviteTargetMode === 'private' ? 'bg-sky-500 text-slate-950' : 'text-slate-300 hover:text-white'
+                    }`}
+                  >
+                    Sala Privada ({privateCode})
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setInviteTargetMode('public')}
+                    className={`py-2 px-3 rounded-md text-xs font-semibold cursor-pointer transition-colors ${
+                      inviteTargetMode === 'public' ? 'bg-sky-500 text-slate-950' : 'text-slate-300 hover:text-white'
+                    }`}
+                  >
+                    Arena Pública
+                  </button>
+                </div>
+                <div className="flex gap-2">
+                  <button
+                    type="button"
+                    onClick={() => onJoinMultiplayer(activeInviteRoom, activeInviteIsPrivate)}
+                    className="flex-1 py-2.5 rounded-lg bg-sky-500 hover:bg-sky-400 text-slate-950 font-display font-bold text-xs cursor-pointer"
+                  >
+                    Abrir y Entrar a {activeInviteRoom}
+                  </button>
+                  {inviteTargetMode === 'private' && (
+                    <button
+                      type="button"
+                      onClick={() => setPrivateCode(`BP-${Math.floor(1000 + Math.random() * 8999)}`)}
+                      className="px-3 py-2.5 rounded-lg bg-[#182132] hover:bg-[#222f46] border border-slate-700 text-xs font-semibold text-slate-200 cursor-pointer whitespace-nowrap"
+                    >
+                      Nuevo Código
+                    </button>
+                  )}
+                </div>
+                {inviteNotice && (
+                  <div className={`text-xs font-medium ${inviteNotice.type === 'success' ? 'text-emerald-400' : 'text-red-400'}`}>
+                    {inviteNotice.text}
+                  </div>
+                )}
+              </div>
+            </div>
+
+            {/* Right 7 cols: Pending Room Invites + Friends List with Real-Time Status */}
+            <div className="lg:col-span-7 space-y-5">
+              {pendingInvites.length > 0 && (
+                <div className="rounded-xl bg-[#0b0f17]/95 border border-amber-500/50 p-5">
+                  <div className="flex items-center justify-between mb-3">
+                    <h3 className="font-display text-lg font-bold text-amber-300">
+                      Invitaciones de Sala Recibidas ({pendingInvites.length})
+                    </h3>
+                  </div>
+                  <div className="space-y-2.5">
+                    {pendingInvites.map((inv) => (
+                      <div
+                        key={inv.id}
+                        className="flex flex-wrap items-center justify-between gap-3 p-3.5 rounded-lg bg-[#131926] border border-slate-700"
+                      >
+                        <div>
+                          <div className="text-sm font-bold text-white">
+                            {inv.fromClanTag ? `[${inv.fromClanTag}] ` : ''}{inv.fromName}
+                          </div>
+                          <div className="text-xs text-slate-300">
+                            Te invita a {inv.isPrivate ? 'Sala Privada' : 'Arena Pública'} ·{' '}
+                            <span className="font-mono-num font-bold text-amber-400">{inv.roomCode}</span>
+                          </div>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <button
+                            onClick={() => onAcceptInvite(inv)}
+                            className="px-3.5 py-2 rounded-lg bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-xs cursor-pointer whitespace-nowrap"
+                          >
+                            Aceptar y Unirse
+                          </button>
+                          <button
+                            onClick={() => onDismissInvite(inv.id)}
+                            className="px-3 py-2 rounded-lg bg-[#1b2436] hover:bg-[#253149] border border-slate-700 text-xs text-slate-300 cursor-pointer"
+                          >
+                            Rechazar
+                          </button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              <div className="rounded-xl bg-[#0b0f17]/95 border border-slate-800 p-6">
+                <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
+                  <div>
+                    <h2 className="font-display text-2xl font-bold text-white">
+                      Lista de Amigos ({friends.length})
+                    </h2>
+                    <p className="text-xs text-slate-400">
+                      {onlineFriends.length} conectados · Estado sincronizado en tiempo real
+                    </p>
+                  </div>
+
+                  {/* Filter Segmented Control */}
+                  <div className="flex items-center gap-1 p-1 rounded-lg bg-[#131926]">
+                    {[
+                      { id: 'all' as const, label: 'Todos' },
+                      { id: 'online' as const, label: 'En línea' },
+                      { id: 'offline' as const, label: 'Desconectados' },
+                    ].map((opt) => (
+                      <button
+                        key={opt.id}
+                        onClick={() => setFriendFilter(opt.id)}
+                        className={`px-3 py-1.5 rounded-md text-xs font-semibold cursor-pointer transition-colors whitespace-nowrap ${
+                          friendFilter === opt.id ? 'bg-amber-500 text-slate-950' : 'text-slate-300 hover:text-white'
+                        }`}
+                      >
+                        {opt.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                {friends.length === 0 ? (
+                  <div className="rounded-lg bg-[#131926] border border-slate-800 p-6 text-center">
+                    <Users className="w-8 h-8 text-slate-500 mx-auto mb-2" />
+                    <div className="text-sm font-semibold text-white mb-1">Aún no tienes amigos agregados</div>
+                    <p className="text-xs text-slate-400 max-w-md mx-auto">
+                      Introduce el ID de un jugador en el panel izquierdo o añádelo directamente desde la pestaña Clasificación.
+                    </p>
+                  </div>
+                ) : (
+                  <div className="space-y-2.5 max-h-[55vh] overflow-y-auto pr-1">
+                    {friends
+                      .filter((f) => {
+                        if (friendFilter === 'online') return f.status !== 'offline';
+                        if (friendFilter === 'offline') return f.status === 'offline';
+                        return true;
+                      })
+                      .map((f) => {
+                        const isOnline = f.status !== 'offline';
+                        const invited = Boolean(recentlyInvitedIds[f.id]);
+                        const canJoinFriendRoom = f.status === 'in_match' && f.roomCode && f.roomCode !== 'ARENA-BOTS';
+                        const statusLabel =
+                          f.status === 'in_match'
+                            ? f.roomCode === 'ARENA-BOTS'
+                              ? 'En partida (Arena Bots)'
+                              : `En sala ${f.roomCode}`
+                            : f.status === 'online'
+                            ? 'En línea · Menú Principal'
+                            : 'Desconectado';
+                        const statusColor =
+                          f.status === 'in_match'
+                            ? 'text-sky-400'
+                            : f.status === 'online'
+                            ? 'text-emerald-400'
+                            : 'text-slate-500';
+                        const indicatorColor =
+                          f.status === 'in_match'
+                            ? 'bg-sky-400'
+                            : f.status === 'online'
+                            ? 'bg-emerald-400'
+                            : 'bg-slate-600';
+
+                        return (
+                          <div
+                            key={f.id}
+                            className="flex flex-wrap items-center justify-between gap-3 p-3.5 rounded-lg bg-[#131926] border border-slate-800"
+                          >
+                            <div className="min-w-0">
+                              <div className="flex items-center gap-2">
+                                <span className={`w-2 h-2 rounded-full shrink-0 ${indicatorColor}`} aria-hidden="true" />
+                                <span className="font-semibold text-sm text-white truncate">
+                                  {f.clanTag ? `[${f.clanTag}] ` : ''}{f.name}
+                                </span>
+                                <span className="font-mono-num text-[11px] text-slate-500 truncate">
+                                  {f.id}
+                                </span>
+                              </div>
+                              <div className={`text-xs mt-1 font-medium ${statusColor}`}>
+                                {statusLabel}
+                              </div>
+                            </div>
+
+                            <div className="flex items-center gap-2 shrink-0">
+                              {canJoinFriendRoom && f.roomCode && (
+                                <button
+                                  onClick={() => onJoinMultiplayer(f.roomCode!, f.isPrivateRoom)}
+                                  className="px-3 py-1.5 rounded-lg bg-sky-500/20 hover:bg-sky-500/30 border border-sky-500/40 text-xs font-semibold text-sky-300 cursor-pointer whitespace-nowrap"
+                                >
+                                  Unirse
+                                </button>
+                              )}
+                              <button
+                                onClick={() => handleQuickInvite(f.id)}
+                                disabled={!isOnline}
+                                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold whitespace-nowrap ${
+                                  !isOnline
+                                    ? 'bg-slate-800 text-slate-500 cursor-not-allowed'
+                                    : invited
+                                    ? 'bg-emerald-500/20 border border-emerald-500/50 text-emerald-300 cursor-pointer'
+                                    : 'bg-amber-500 hover:bg-amber-400 text-slate-950 cursor-pointer'
+                                }`}
+                              >
+                                <Send className="w-3.5 h-3.5" />
+                                {invited ? 'Invitación Enviada' : `Invitar a ${activeInviteRoom}`}
+                              </button>
+                              <button
+                                onClick={() => onRemoveFriend(f.id)}
+                                title="Eliminar amigo"
+                                className="p-2 rounded-lg bg-[#1a2232] hover:bg-red-950/80 border border-slate-700 hover:border-red-700/60 text-slate-400 hover:text-red-300 cursor-pointer"
+                              >
+                                <Trash2 className="w-3.5 h-3.5" />
+                              </button>
+                            </div>
+                          </div>
+                        );
+                      })}
+                  </div>
+                )}
               </div>
             </div>
           </div>
@@ -840,11 +1283,13 @@ export const MainMenuHub: React.FC<MainMenuHubProps> = ({
                     <th className="py-2.5 px-2 text-right">K/D</th>
                     <th className="py-2.5 px-2 text-right">Victorias</th>
                     <th className="py-2.5 px-2 text-right">Rating</th>
+                    <th className="py-2.5 px-2 text-right">Amigos</th>
                   </tr>
                 </thead>
                 <tbody>
                   {leaderboard.map((row, idx) => {
                     const isSelf = row.id === profile.id;
+                    const isFriend = friends.some((f) => f.id === row.id);
                     const kd = row.deaths > 0 ? (row.kills / row.deaths).toFixed(2) : row.kills.toFixed(2);
                     return (
                       <tr
@@ -855,10 +1300,13 @@ export const MainMenuHub: React.FC<MainMenuHubProps> = ({
                       >
                         <td className="py-2.5 px-2 font-mono-num">#{idx + 1}</td>
                         <td className="py-2.5 px-2">
-                          {row.clanTag ? (
-                            <span className="font-mono-num text-amber-400 mr-1.5">[{row.clanTag}]</span>
-                          ) : null}
-                          {row.name}
+                          <div>
+                            {row.clanTag ? (
+                              <span className="font-mono-num text-amber-400 mr-1.5">[{row.clanTag}]</span>
+                            ) : null}
+                            {row.name}
+                          </div>
+                          <div className="font-mono-num text-[10px] text-slate-500">{row.id}</div>
                         </td>
                         <td className="py-2.5 px-2 text-right font-mono-num">{row.kills}</td>
                         <td className="py-2.5 px-2 text-right font-mono-num">{row.deaths}</td>
@@ -866,6 +1314,20 @@ export const MainMenuHub: React.FC<MainMenuHubProps> = ({
                         <td className="py-2.5 px-2 text-right font-mono-num">{row.wins}</td>
                         <td className="py-2.5 px-2 text-right font-mono-num font-bold text-amber-400">
                           {row.rating}
+                        </td>
+                        <td className="py-2.5 px-2 text-right">
+                          {isSelf ? (
+                            <span className="text-xs text-slate-400">Tú</span>
+                          ) : isFriend ? (
+                            <span className="text-xs font-semibold text-emerald-400">Amigo</span>
+                          ) : (
+                            <button
+                              onClick={() => onAddFriend(row.id)}
+                              className="px-2.5 py-1 rounded bg-[#1a2232] hover:bg-[#26334a] border border-slate-700 text-xs font-semibold text-white cursor-pointer"
+                            >
+                              Añadir
+                            </button>
+                          )}
                         </td>
                       </tr>
                     );

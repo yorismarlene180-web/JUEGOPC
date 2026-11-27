@@ -84,10 +84,39 @@ interface MatchRoom {
   killTarget: number;
 }
 
+interface PlayerDirectoryEntry {
+  id: string;
+  name: string;
+  clanTag: string;
+  lastSeen: number;
+}
+
+interface FriendInfo {
+  id: string;
+  name: string;
+  clanTag: string;
+  status: 'online' | 'in_match' | 'offline';
+  roomCode: string | null;
+  isPrivateRoom: boolean;
+  lastSeen: number;
+}
+
+interface OnlinePresence {
+  playerId: string;
+  name: string;
+  clanTag: string;
+  status: 'online' | 'in_match';
+  roomCode: string | null;
+  isPrivateRoom: boolean;
+  ws: WebSocket;
+}
+
 interface PersistedState {
   leaderboard: LeaderboardEntry[];
   clans: ClanInfo[];
   globalChat: ChatMessage[];
+  players: Record<string, PlayerDirectoryEntry>;
+  friendships: Record<string, string[]>;
 }
 
 const DEFAULT_LOADOUT: AvatarLoadout = {
@@ -177,6 +206,8 @@ function createSeedState(): PersistedState {
         channel: 'system',
       },
     ],
+    players: {},
+    friendships: {},
   };
 }
 
@@ -184,9 +215,15 @@ function loadState(): PersistedState {
   try {
     if (fs.existsSync(DB_FILE)) {
       const raw = fs.readFileSync(DB_FILE, 'utf-8');
-      const parsed = JSON.parse(raw) as PersistedState;
+      const parsed = JSON.parse(raw) as Partial<PersistedState>;
       if (Array.isArray(parsed.leaderboard) && Array.isArray(parsed.clans)) {
-        return parsed;
+        return {
+          leaderboard: parsed.leaderboard,
+          clans: parsed.clans,
+          globalChat: Array.isArray(parsed.globalChat) ? parsed.globalChat : [],
+          players: parsed.players && typeof parsed.players === 'object' ? parsed.players : {},
+          friendships: parsed.friendships && typeof parsed.friendships === 'object' ? parsed.friendships : {},
+        };
       }
     }
   } catch {
@@ -209,6 +246,92 @@ function saveState(state: PersistedState) {
 const db: PersistedState = loadState();
 const rooms = new Map<string, MatchRoom>();
 const clientMeta = new Map<WebSocket, { playerId: string; roomCode: string | null }>();
+const onlinePresence = new Map<string, OnlinePresence>();
+
+function upsertPlayerDirectory(playerId: string, name: string, clanTag: string) {
+  const cleanId = String(playerId || '').trim().slice(0, 40);
+  if (!cleanId) return;
+  db.players[cleanId] = {
+    id: cleanId,
+    name: String(name || 'Operador').slice(0, 20),
+    clanTag: String(clanTag || '').slice(0, 4).toUpperCase(),
+    lastSeen: Date.now(),
+  };
+}
+
+function findPlayerInfo(targetId: string): PlayerDirectoryEntry | null {
+  const online = onlinePresence.get(targetId);
+  if (online) {
+    return {
+      id: online.playerId,
+      name: online.name,
+      clanTag: online.clanTag,
+      lastSeen: Date.now(),
+    };
+  }
+  if (db.players[targetId]) {
+    return db.players[targetId];
+  }
+  const lbEntry = db.leaderboard.find((e) => e.id === targetId);
+  if (lbEntry) {
+    return {
+      id: lbEntry.id,
+      name: lbEntry.name,
+      clanTag: lbEntry.clanTag,
+      lastSeen: lbEntry.updatedAt,
+    };
+  }
+  return null;
+}
+
+function buildFriendsList(playerId: string): FriendInfo[] {
+  const friendIds = db.friendships[playerId] || [];
+  const list: FriendInfo[] = [];
+  for (const fid of friendIds) {
+    const online = onlinePresence.get(fid);
+    if (online && online.ws.readyState === WebSocket.OPEN) {
+      list.push({
+        id: fid,
+        name: online.name,
+        clanTag: online.clanTag,
+        status: online.status,
+        roomCode: online.roomCode,
+        isPrivateRoom: online.isPrivateRoom,
+        lastSeen: Date.now(),
+      });
+    } else {
+      const info = findPlayerInfo(fid);
+      list.push({
+        id: fid,
+        name: info?.name || fid,
+        clanTag: info?.clanTag || '',
+        status: 'offline',
+        roomCode: null,
+        isPrivateRoom: false,
+        lastSeen: info?.lastSeen || 0,
+      });
+    }
+  }
+  const order = { in_match: 0, online: 1, offline: 2 };
+  return list.sort((a, b) => order[a.status] - order[b.status] || a.name.localeCompare(b.name));
+}
+
+function syncFriendsToPlayer(playerId: string) {
+  const presence = onlinePresence.get(playerId);
+  if (presence && presence.ws.readyState === WebSocket.OPEN) {
+    sendJson(presence.ws, {
+      type: 'friends:sync',
+      friends: buildFriendsList(playerId),
+    });
+  }
+}
+
+function notifyFriendsOf(playerId: string) {
+  const friendIds = db.friendships[playerId] || [];
+  for (const fid of friendIds) {
+    syncFriendsToPlayer(fid);
+  }
+}
 
 function getOrCreateRoom(code: string, isPrivate: boolean, hostName: string): MatchRoom {
   const existing = rooms.get(code);
@@ -459,6 +582,79 @@ async function startServer() {
     });
   });
 
+  // Friends Management Endpoints
+  app.get('/api/friends/:playerId', (req, res) => {
+    const playerId = String(req.params.playerId || '').trim();
+    if (!playerId) {
+      res.status(400).json({ error: 'ID de jugador inválido.' });
+      return;
+    }
+    res.json({ friends: buildFriendsList(playerId) });
+  });
+
+  app.post('/api/friends/add', (req, res) => {
+    const playerId = String(req.body?.playerId || '').trim().slice(0, 40);
+    const targetId = String(req.body?.targetId || '').trim().slice(0, 40);
+    const playerName = String(req.body?.playerName || 'Operador').slice(0, 20);
+    const playerClanTag = String(req.body?.clanTag || '').slice(0, 4).toUpperCase();
+
+    if (!playerId || !targetId) {
+      res.status(400).json({ error: 'Debes ingresar un ID de jugador válido.' });
+      return;
+    }
+    if (playerId === targetId) {
+      res.status(400).json({ error: 'No puedes añadirte a ti mismo como amigo.' });
+      return;
+    }
+
+    upsertPlayerDirectory(playerId, playerName, playerClanTag);
+    const target = findPlayerInfo(targetId);
+    if (!target) {
+      res.status(404).json({ error: `No se encontró ningún operador registrado con el ID "${targetId}".` });
+      return;
+    }
+
+    const myFriends = db.friendships[playerId] || [];
+    if (myFriends.includes(targetId)) {
+      res.status(409).json({ error: `${target.name} ya está en tu lista de amigos.` });
+      return;
+    }
+
+    db.friendships[playerId] = [...myFriends, targetId];
+    const targetFriends = db.friendships[targetId] || [];
+    if (!targetFriends.includes(playerId)) {
+      db.friendships[targetId] = [...targetFriends, playerId];
+    }
+
+    saveState(db);
+    syncFriendsToPlayer(playerId);
+    syncFriendsToPlayer(targetId);
+
+    res.json({ ok: true, added: target, friends: buildFriendsList(playerId) });
+  });
+
+  app.post('/api/friends/remove', (req, res) => {
+    const playerId = String(req.body?.playerId || '').trim().slice(0, 40);
+    const targetId = String(req.body?.targetId || '').trim().slice(0, 40);
+    if (!playerId || !targetId) {
+      res.status(400).json({ error: 'Datos inválidos.' });
+      return;
+    }
+
+    if (db.friendships[playerId]) {
+      db.friendships[playerId] = db.friendships[playerId].filter((id) => id !== targetId);
+    }
+    if (db.friendships[targetId]) {
+      db.friendships[targetId] = db.friendships[targetId].filter((id) => id !== playerId);
+    }
+
+    saveState(db);
+    syncFriendsToPlayer(playerId);
+    syncFriendsToPlayer(targetId);
+
+    res.json({ ok: true, friends: buildFriendsList(playerId) });
+  });
+
   // Authoritative 20Hz respawn & round timer loop
   setInterval(() => {
     const now = Date.now();
@@ -536,6 +732,74 @@ async function startServer() {
 
       const type = String(msg.type || '');
 
+      if (type === 'presence:register') {
+        const playerId = String(msg.playerId || '').trim().slice(0, 40);
+        const name = String(msg.name || 'Operador').slice(0, 20);
+        const clanTag = String(msg.clanTag || '').slice(0, 4).toUpperCase();
+        const status = msg.status === 'in_match' ? 'in_match' : 'online';
+        const roomCode = msg.roomCode ? String(msg.roomCode).slice(0, 16) : null;
+        const isPrivateRoom = Boolean(msg.isPrivateRoom);
+        if (!playerId) return;
+
+        meta.playerId = playerId;
+        upsertPlayerDirectory(playerId, name, clanTag);
+        onlinePresence.set(playerId, {
+          playerId,
+          name,
+          clanTag,
+          status,
+          roomCode,
+          isPrivateRoom,
+          ws,
+        });
+        saveState(db);
+        syncFriendsToPlayer(playerId);
+        notifyFriendsOf(playerId);
+        return;
+      }
+
+      if (type === 'presence:status') {
+        const existing = onlinePresence.get(meta.playerId);
+        if (existing && existing.ws === ws) {
+          existing.status = msg.status === 'in_match' ? 'in_match' : 'online';
+          existing.roomCode = msg.roomCode ? String(msg.roomCode).slice(0, 16) : null;
+          existing.isPrivateRoom = Boolean(msg.isPrivateRoom);
+          notifyFriendsOf(meta.playerId);
+        }
+        return;
+      }
+
+      if (type === 'invite:send') {
+        const toPlayerId = String(msg.toPlayerId || '').trim();
+        const roomCode = String(msg.roomCode || '').trim().toUpperCase().slice(0, 12);
+        const isPrivate = Boolean(msg.isPrivate);
+        const sender = onlinePresence.get(meta.playerId);
+        const recipient = onlinePresence.get(toPlayerId);
+
+        if (!roomCode) {
+          sendJson(ws, { type: 'invite:error', message: 'Código de sala inválido.' });
+          return;
+        }
+        if (!recipient || recipient.ws.readyState !== WebSocket.OPEN) {
+          sendJson(ws, { type: 'invite:error', message: 'El jugador no está conectado en este momento.' });
+          return;
+        }
+
+        const invite = {
+          id: `inv_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+          fromId: meta.playerId,
+          fromName: sender?.name || String(msg.fromName || 'Operador').slice(0, 20),
+          fromClanTag: sender?.clanTag || String(msg.fromClanTag || '').slice(0, 4).toUpperCase(),
+          roomCode,
+          isPrivate,
+          timestamp: Date.now(),
+        };
+
+        sendJson(recipient.ws, { type: 'invite:received', invite });
+        sendJson(ws, { type: 'invite:sent', toPlayerId, toName: recipient.name, roomCode });
+        return;
+      }
+
       if (type === 'room:join') {
         const requestedCode = String(msg.roomCode || 'PUBLIC-1').trim().toUpperCase().slice(0, 12);
         const isPrivate = Boolean(msg.isPrivate);
@@ -553,6 +817,18 @@ async function startServer() {
 
         meta.playerId = playerId;
         meta.roomCode = requestedCode;
+
+        upsertPlayerDirectory(playerId, name, clanTag);
+        onlinePresence.set(playerId, {
+          playerId,
+          name,
+          clanTag,
+          status: 'in_match',
+          roomCode: requestedCode,
+          isPrivateRoom: isPrivate,
+          ws,
+        });
+        notifyFriendsOf(playerId);
 
         const room = getOrCreateRoom(requestedCode, isPrivate, name);
         const spawn = SPAWN_POINTS[room.players.size % SPAWN_POINTS.length];
@@ -621,6 +897,13 @@ async function startServer() {
           }
           meta.roomCode = null;
           broadcastAll(wss, { type: 'rooms:sync', rooms: getRoomsSummary() });
+        }
+        const presence = onlinePresence.get(meta.playerId);
+        if (presence && presence.ws === ws) {
+          presence.status = 'online';
+          presence.roomCode = null;
+          presence.isPrivateRoom = false;
+          notifyFriendsOf(meta.playerId);
         }
         return;
       }
@@ -844,6 +1127,15 @@ async function startServer() {
           rooms.delete(room.code);
         }
         broadcastAll(wss, { type: 'rooms:sync', rooms: getRoomsSummary() });
+      }
+      if (meta?.playerId) {
+        const current = onlinePresence.get(meta.playerId);
+        if (current && current.ws === ws) {
+          onlinePresence.delete(meta.playerId);
+          upsertPlayerDirectory(meta.playerId, current.name, current.clanTag);
+          saveState(db);
+          notifyFriendsOf(meta.playerId);
+        }
       }
       clientMeta.delete(ws);
     });

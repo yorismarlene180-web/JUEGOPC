@@ -1,0 +1,139 @@
+{
+  "leaderboard": [
+    {
+      "id": "seed_1",
+      "name": "Cmdt_Vega",
+      "clanTag": "VLK",
+      "kills": 312,
+      "deaths": 108,
+      "wins": 28,
+      "matches": 42,
+      "rating": 2480,
+      "updatedAt": 1795745173433
+    },
+    {
+      "id": "seed_2",
+      "name": "Ramiro_ARG",
+      "clanTag": "LBS",
+      "kills": 264,
+      "deaths": 119,
+      "wins": 22,
+      "matches": 39,
+      "rating": 2215,
+      "updatedAt": 1795745173433
+    },
+    {
+      "id": "seed_3",
+      "name": "Nox_MX",
+      "clanTag": "CNT",
+      "kills": 219,
+      "deaths": 104,
+      "wins": 19,
+      "matches": 34,
+      "rating": 2040,
+      "updatedAt": 1795745173433
+    },
+    {
+      "id": "seed_4",
+      "name": "Kael_ES",
+      "clanTag": "ESP",
+      "kills": 188,
+      "deaths": 98,
+      "wins": 15,
+      "matches": 31,
+      "rating": 1890,
+      "updatedAt": 1795745173433
+    },
+    {
+      "id": "seed_5",
+      "name": "Sombra_CL",
+      "clanTag": "VLK",
+      "kills": 154,
+      "deaths": 89,
+      "wins": 12,
+      "matches": 26,
+      "rating": 1710,
+      "updatedAt": 1795745173433
+    },
+    {
+      "id": "seed_6",
+      "name": "Titan_CO",
+      "clanTag": "LBS",
+      "kills": 131,
+      "deaths": 92,
+      "wins": 9,
+      "matches": 24,
+      "rating": 1560,
+      "updatedAt": 1795745173433
+    }
+  ],
+  "clans": [
+    {
+      "id": "clan_valkyria",
+      "tag": "VLK",
+      "name": "Escuadrón Valkiria",
+      "description": "Operadores tácticos de élite en servidores de PC.",
+      "color": "#f59e0b",
+      "membersCount": 19,
+      "totalPoints": 14850,
+      "totalWins": 64,
+      "leaderName": "Cmdt_Vega"
+    },
+    {
+      "id": "clan_lobos",
+      "tag": "LBS",
+      "name": "Lobos de Hierro",
+      "description": "Precisión a larga distancia y control de mapa.",
+      "color": "#38bdf8",
+      "membersCount": 14,
+      "totalPoints": 12420,
+      "totalWins": 51,
+      "leaderName": "Ramiro_ARG"
+    },
+    {
+      "id": "clan_centinela",
+      "tag": "CNT",
+      "name": "Centinela Sur",
+      "description": "Disciplina competitiva en arena 3D.",
+      "color": "#10b981",
+      "membersCount": 11,
+      "totalPoints": 9840,
+      "totalWins": 39,
+      "leaderName": "Nox_MX"
+    },
+    {
+      "id": "clan_espectro",
+      "tag": "ESP",
+      "name": "División Espectro",
+      "description": "Asalto rápido y coordinación por voz.",
+      "color": "#ef4444",
+      "membersCount": 9,
+      "totalPoints": 8310,
+      "totalWins": 32,
+      "leaderName": "Kael_ES"
+    }
+  ],
+  "globalChat": [
+    {
+      "id": "sys_welcome",
+      "senderId": "system",
+      "senderName": "SISTEMA",
+      "clanTag": "",
+      "text": "Bienvenido a BATTLEPLAYERS PC. Crea una sala privada o únete a la arena pública.",
+      "timestamp": 1795745173433,
+      "channel": "system"
+    }
+  ],
+  "players": {
+    "smoke_test_op": {
+      "id": "smoke_test_op",
+      "name": "SmokeTest",
+      "clanTag": "",
+      "lastSeen": 1795745988022
+    }
+  },
+  "friendships": {
+    "smoke_test_op": [],
+    "seed_1": []
+  }
+}

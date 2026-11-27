@@ -100,6 +100,28 @@ export interface KillFeedEvent {
   timestamp: number;
 }
 
+export type FriendStatus = 'online' | 'in_match' | 'offline';
+
+export interface FriendInfo {
+  id: string;
+  name: string;
+  clanTag: string;
+  status: FriendStatus;
+  roomCode: string | null;
+  isPrivateRoom: boolean;
+  lastSeen: number;
+}
+
+export interface RoomInvite {
+  id: string;
+  fromId: string;
+  fromName: string;
+  fromClanTag: string;
+  roomCode: string;
+  isPrivate: boolean;
+  timestamp: number;
+}
+
 export interface MatchSummary {
   mode: 'solo' | 'multiplayer';
   roomCode: string;
