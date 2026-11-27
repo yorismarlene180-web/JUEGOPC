@@ -3,6 +3,7 @@ import { Check, Maximize2, RotateCw, UserPlus, WifiOff, X } from 'lucide-react';
 import { soundEngine } from './audio/soundEngine';
 import { voiceChat, type VoiceStatus } from './audio/voiceChat';
 import { GameHUD } from './components/GameHUD';
+import { InstallDownloadModal } from './components/InstallDownloadModal';
 import { MainMenuHub, type HubTab } from './components/MainMenuHub';
 import { MatchSummaryModal } from './components/MatchSummaryModal';
 import { TitleScreen } from './components/TitleScreen';
@@ -68,6 +69,7 @@ export default function App() {
   const [scoreboardOpen, setScoreboardOpen] = useState(false);
   const [hud, setHud] = useState<HudSnapshot>(INITIAL_HUD);
   const [matchSummary, setMatchSummary] = useState<MatchSummary | null>(null);
+  const [installModalOpen, setInstallModalOpen] = useState(false);
   const [webglLost, setWebglLost] = useState(false);
 
   // Internet Connectivity & Android Horizontal Fullscreen Detection
@@ -787,6 +789,7 @@ export default function App() {
           }}
           onQuickPlayBots={() => startSoloBots('veterano')}
           onRequestFullscreenLandscape={requestFullscreenLandscape}
+          onOpenInstallModal={() => setInstallModalOpen(true)}
         />
       )}
 
@@ -823,6 +826,7 @@ export default function App() {
           onSendInvite={handleSendInvite}
           onAcceptInvite={handleAcceptInvite}
           onDismissInvite={handleDismissInvite}
+          onOpenInstallModal={() => setInstallModalOpen(true)}
         />
       )}
 
@@ -957,6 +961,9 @@ export default function App() {
           </div>
         </div>
       )}
+
+      {/* Install & Windows (.EXE) / Android (.APK) Kit Modal */}
+      <InstallDownloadModal open={installModalOpen} onClose={() => setInstallModalOpen(false)} />
 
       {/* Online-Required Internet Connection Guard */}
       {!browserOnline && (

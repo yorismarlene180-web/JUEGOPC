@@ -6,6 +6,7 @@ import {
   Copy,
   Crosshair,
   Crown,
+  Download,
   Gift,
   MessageSquare,
   Mic,
@@ -69,6 +70,7 @@ interface MainMenuHubProps {
   onSendInvite: (toPlayerId: string, roomCode: string, isPrivate: boolean) => void;
   onAcceptInvite: (invite: RoomInvite) => void;
   onDismissInvite: (inviteId: string) => void;
+  onOpenInstallModal: () => void;
 }
 
 const SHOP_CATEGORIES: Array<{ id: AccessoryCategory; label: string }> = [
@@ -110,6 +112,7 @@ export const MainMenuHub: React.FC<MainMenuHubProps> = ({
   onSendInvite,
   onAcceptInvite,
   onDismissInvite,
+  onOpenInstallModal,
 }) => {
   const [difficulty, setDifficulty] = useState<BotDifficulty>('veterano');
   const [joinCode, setJoinCode] = useState('');
@@ -315,7 +318,14 @@ export const MainMenuHub: React.FC<MainMenuHubProps> = ({
                   </div>
                 </div>
 
-                <div className="flex items-center gap-2">
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    onClick={onOpenInstallModal}
+                    className="flex items-center gap-2 px-3.5 py-2 rounded-lg bg-sky-500/15 hover:bg-sky-500/25 border border-sky-500/50 text-sky-300 text-xs font-semibold cursor-pointer whitespace-nowrap"
+                  >
+                    <Download className="w-4 h-4" />
+                    Descargar PC / APK
+                  </button>
                   <button
                     onClick={onToggleMic}
                     className={`flex items-center gap-2 px-3.5 py-2 rounded-lg border text-xs font-semibold cursor-pointer ${

@@ -4,6 +4,7 @@ import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { WebSocketServer, WebSocket } from 'ws';
+import JSZip from 'jszip';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -653,6 +654,204 @@ async function startServer() {
     syncFriendsToPlayer(targetId);
 
     res.json({ ok: true, friends: buildFriendsList(playerId) });
+  });
+
+  // Downloadable Windows (.exe builder via Electron) & Android (.apk builder via Capacitor) Kit
+  app.get('/api/download/native-kit', async (req, res) => {
+    try {
+      const forwardedProto = String(req.headers['x-forwarded-proto'] || req.protocol || 'https').split(',')[0].trim();
+      const host = String(req.headers['x-forwarded-host'] || req.headers.host || 'localhost:3000').split(',')[0].trim();
+      const originUrl = process.env.APP_URL || `${forwardedProto}://${host}`;
+
+      const zip = new JSZip();
+
+      // 1. Windows Electron (.exe) Wrapper
+      const winFolder = zip.folder('windows-exe')!;
+      winFolder.file(
+        'package.json',
+        JSON.stringify(
+          {
+            name: 'battleplayers-desktop',
+            version: '1.0.0',
+            description: 'BATTLEPLAYERS 3D Tactical Shooter for Windows PC',
+            main: 'main.cjs',
+            scripts: {
+              start: 'electron .',
+              'build:exe': 'electron-builder --win nsis',
+            },
+            build: {
+              appId: 'com.battleplayers.desktop',
+              productName: 'BATTLEPLAYERS',
+              win: {
+                target: ['nsis', 'portable'],
+                icon: 'icon.png',
+              },
+              nsis: {
+                oneClick: false,
+                allowToChangeInstallationDirectory: true,
+              },
+            },
+            devDependencies: {
+              electron: '^33.2.0',
+              'electron-builder': '^25.1.8',
+            },
+          },
+          null,
+          2,
+        ),
+      );
+
+      winFolder.file(
+        'main.cjs',
+        `const { app, BrowserWindow, session } = require('electron');
+
+const GAME_URL = ${JSON.stringify(originUrl)};
+
+function createWindow() {
+  const win = new BrowserWindow({
+    width: 1440,
+    height: 900,
+    minWidth: 1024,
+    minHeight: 640,
+    title: 'BATTLEPLAYERS',
+    backgroundColor: '#0a0d12',
+    autoHideMenuBar: true,
+    webPreferences: {
+      nodeIntegration: false,
+      contextIsolation: true,
+    },
+  });
+
+  session.defaultSession.setPermissionRequestHandler((_webContents, permission, callback) => {
+    if (permission === 'media' || permission === 'fullscreen' || permission === 'pointerLock') {
+      callback(true);
+      return;
+    }
+    callback(false);
+  });
+
+  win.loadURL(GAME_URL);
+}
+
+app.whenReady().then(createWindow);
+app.on('window-all-closed', () => {
+  if (process.platform !== 'darwin') app.quit();
+});
+`,
+      );
+
+      winFolder.file(
+        'CREAR-EXE-WINDOWS.bat',
+        `@echo off
+echo Instalando dependencias para generar BATTLEPLAYERS.exe...
+call npm install
+if errorlevel 1 exit /b 1
+echo Compilando instalador .exe en carpeta dist\\ ...
+call npm run build:exe
+pause
+`,
+      );
+
+      // 2. Android Capacitor (.apk) Horizontal Fullscreen Wrapper
+      const androidFolder = zip.folder('android-apk')!;
+      androidFolder.file(
+        'package.json',
+        JSON.stringify(
+          {
+            name: 'battleplayers-android',
+            version: '1.0.0',
+            description: 'BATTLEPLAYERS Android Landscape Shooter',
+            scripts: {
+              'init:android': 'npx cap add android && npx cap sync android',
+              'open:studio': 'npx cap open android',
+            },
+            dependencies: {
+              '@capacitor/core': '^6.2.0',
+              '@capacitor/android': '^6.2.0',
+            },
+            devDependencies: {
+              '@capacitor/cli': '^6.2.0',
+            },
+          },
+          null,
+          2,
+        ),
+      );
+
+      androidFolder.file(
+        'capacitor.config.json',
+        JSON.stringify(
+          {
+            appId: 'com.battleplayers.android',
+            appName: 'BATTLEPLAYERS',
+            webDir: 'www',
+            server: {
+              url: originUrl,
+              cleartext: false,
+            },
+            android: {
+              allowMixedContent: false,
+              backgroundColor: '#0a0d12',
+            },
+          },
+          null,
+          2,
+        ),
+      );
+
+      const wwwFolder = androidFolder.folder('www')!;
+      wwwFolder.file(
+        'index.html',
+        `<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="refresh" content="0;url=${originUrl}"></head><body style="background:#0a0d12;color:#fff;font-family:sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;">Cargando BATTLEPLAYERS...</body></html>`,
+      );
+
+      androidFolder.file(
+        'AndroidManifest-ORIENTATION-LANDSCAPE.txt',
+        `En android/app/src/main/AndroidManifest.xml dentro de <activity android:name=".MainActivity"...>, agrega:
+android:screenOrientation="sensorLandscape"
+y permisos de microfono e internet:
+<uses-permission android:name="android.permission.INTERNET" />
+<uses-permission android:name="android.permission.RECORD_AUDIO" />
+<uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />`,
+      );
+
+      // Attach PNG icon if present
+      const iconPath = path.join(__dirname, 'public', 'pwa-512x512.png');
+      if (fs.existsSync(iconPath)) {
+        const iconBuf = fs.readFileSync(iconPath);
+        winFolder.file('icon.png', iconBuf);
+        androidFolder.file('icon.png', iconBuf);
+      }
+
+      zip.file(
+        'INSTRUCCIONES.txt',
+        `BATTLEPLAYERS — KIT NATIVO WINDOWS (.EXE) Y ANDROID (.APK)
+Servidor en linea configurado: ${originUrl}
+
+1) PARA WINDOWS (.EXE):
+   - Abre la carpeta "windows-exe".
+   - Asegurate de tener Node.js instalado en Windows.
+   - Haz doble clic en "CREAR-EXE-WINDOWS.bat" (o ejecuta: npm install && npm run build:exe).
+   - Tu instalador .exe y version portable se generaran en "windows-exe/dist/".
+
+2) PARA ANDROID (.APK EN HORIZONTAL):
+   - Abre la carpeta "android-apk".
+   - Ejecuta: npm install && npm run init:android
+   - Aplica sensorLandscape en AndroidManifest.xml (ver AndroidManifest-ORIENTATION-LANDSCAPE.txt).
+   - Abre en Android Studio con: npm run open:studio y selecciona Build -> Build APK(s).
+
+NOTA: Tambien puedes instalar BATTLEPLAYERS en 1 clic directamente desde Chrome/Edge en Windows o Android sin compilar nada usando el boton "Instalar App" dentro del juego.
+`,
+      );
+
+      const zipBuffer = await zip.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE' });
+      res.setHeader('Content-Type', 'application/zip');
+      res.setHeader('Content-Disposition', 'attachment; filename="BATTLEPLAYERS-Windows-EXE-Android-APK-Kit.zip"');
+      res.send(zipBuffer);
+    } catch (err) {
+      console.error('Failed to build native kit zip', err);
+      res.status(500).json({ error: 'No se pudo generar el paquete descargable.' });
+    }
   });
 
   // Authoritative 20Hz respawn & round timer loop

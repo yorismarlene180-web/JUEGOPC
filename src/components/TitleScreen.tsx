@@ -1,5 +1,5 @@
 import React, { useEffect } from 'react';
-import { Crosshair, Maximize2, Play, Shield, Users, Wifi } from 'lucide-react';
+import { Crosshair, Download, Maximize2, Play, Shield, Users, Wifi } from 'lucide-react';
 
 interface TitleScreenProps {
   playerName: string;
@@ -8,6 +8,7 @@ interface TitleScreenProps {
   onEnterMenu: () => void;
   onQuickPlayBots: () => void;
   onRequestFullscreenLandscape: () => void;
+  onOpenInstallModal: () => void;
 }
 
 export const TitleScreen: React.FC<TitleScreenProps> = ({
@@ -17,6 +18,7 @@ export const TitleScreen: React.FC<TitleScreenProps> = ({
   onEnterMenu,
   onQuickPlayBots,
   onRequestFullscreenLandscape,
+  onOpenInstallModal,
 }) => {
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
@@ -128,6 +130,14 @@ export const TitleScreen: React.FC<TitleScreenProps> = ({
           >
             <Crosshair className="w-4 h-4 text-amber-400" />
             Partida Rápida (Bots en Línea)
+          </button>
+
+          <button
+            onClick={onOpenInstallModal}
+            className="flex items-center gap-2 px-4 py-3 rounded-lg bg-[#161e2c] hover:bg-[#1f293b] border border-sky-500/50 text-sky-300 font-semibold text-xs md:text-sm transition-colors cursor-pointer whitespace-nowrap shrink-0"
+          >
+            <Download className="w-4 h-4" />
+            Descargar PC / Android
           </button>
         </div>
 
