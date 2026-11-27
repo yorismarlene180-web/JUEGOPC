@@ -227,6 +227,50 @@ class TacticalSoundEngine {
     noise.start(now);
   }
 
+  public playFireDeath() {
+    const ctx = this.ensureContext();
+    if (!ctx) return;
+    const now = ctx.currentTime;
+    const vol = 0.55 * this.masterVolume;
+
+    // Fiery whoosh + crackle sweep
+    const bufferSize = Math.floor(ctx.sampleRate * 0.72);
+    const buffer = ctx.createBuffer(1, bufferSize, ctx.sampleRate);
+    const data = buffer.getChannelData(0);
+    for (let i = 0; i < bufferSize; i++) {
+      const env = Math.sin(Math.min(1, i / (bufferSize * 0.15)) * (Math.PI / 2)) * Math.exp(-i / (bufferSize * 0.34));
+      const crackle = Math.random() > 0.96 ? 1.5 : 0.75;
+      data[i] = (Math.random() * 2 - 1) * env * crackle;
+    }
+
+    const noise = ctx.createBufferSource();
+    noise.buffer = buffer;
+
+    const filter = ctx.createBiquadFilter();
+    filter.type = 'bandpass';
+    filter.frequency.setValueAtTime(1100, now);
+    filter.frequency.exponentialRampToValueAtTime(320, now + 0.68);
+    filter.Q.setValueAtTime(0.8, now);
+
+    const nGain = ctx.createGain();
+    nGain.gain.setValueAtTime(vol, now);
+    nGain.gain.exponentialRampToValueAtTime(0.001, now + 0.72);
+
+    noise.connect(filter).connect(nGain).connect(ctx.destination);
+    noise.start(now);
+
+    const osc = ctx.createOscillator();
+    const oGain = ctx.createGain();
+    osc.type = 'sawtooth';
+    osc.frequency.setValueAtTime(190, now);
+    osc.frequency.exponentialRampToValueAtTime(48, now + 0.32);
+    oGain.gain.setValueAtTime(vol * 0.45, now);
+    oGain.gain.exponentialRampToValueAtTime(0.001, now + 0.34);
+    osc.connect(oGain).connect(ctx.destination);
+    osc.start(now);
+    osc.stop(now + 0.35);
+  }
+
   public playReward() {
     const ctx = this.ensureContext();
     if (!ctx) return;

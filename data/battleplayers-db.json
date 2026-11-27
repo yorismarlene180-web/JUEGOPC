@@ -130,10 +130,17 @@
       "name": "SmokeTest",
       "clanTag": "",
       "lastSeen": 1795745988022
+    },
+    "op_bsv6wtxu": {
+      "id": "op_bsv6wtxu",
+      "name": "RHAAXGTA",
+      "clanTag": "VLK",
+      "lastSeen": 1795748500765
     }
   },
   "friendships": {
     "smoke_test_op": [],
     "seed_1": []
-  }
+  },
+  "profiles": {}
 }

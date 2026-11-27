@@ -1,7 +1,8 @@
 import React, { useState } from 'react';
 import { Award, Check, Copy, Download, RotateCcw, Share2, Trophy } from 'lucide-react';
 import { ACHIEVEMENT_META } from '../data/catalog';
-import type { MatchSummary } from '../types/game';
+import { isVerifiedPlayer, type MatchSummary } from '../types/game';
+import { VerifiedBadge } from './VerifiedBadge';
 
 interface MatchSummaryModalProps {
   summary: MatchSummary;
@@ -62,7 +63,8 @@ function generateAchievementCardPng(
   // Player & Clan
   ctx.fillStyle = '#cbd5e1';
   ctx.font = '600 32px sans-serif';
-  ctx.fillText(`${clanTag ? `[${clanTag}] ` : ''}${playerName}`, 64, 232);
+  const displayTitle = `${clanTag ? `[${clanTag}] ` : ''}${playerName}${isVerifiedPlayer(playerName) ? ' ✓ VERIFICADO' : ''}`;
+  ctx.fillText(displayTitle, 64, 232);
 
   // Stat boxes
   const acc = summary.shotsFired > 0 ? Math.round((summary.shotsHit / summary.shotsFired) * 100) : 0;
@@ -170,9 +172,13 @@ export const MatchSummaryModal: React.FC<MatchSummaryModalProps> = ({
             <div className="text-xs font-semibold text-amber-400 mb-1">
               {summary.mode === 'solo' ? 'Arena Individual con Bots · En Línea' : `Sala Multijugador · ${summary.roomCode}`}
             </div>
-            <h2 className="font-display text-3xl font-bold text-white">
+            <h2 className="font-display text-3xl font-bold text-white flex items-center gap-2">
               {summary.won ? 'Victoria en la Arena' : `Puesto #${summary.placement} Finalizado`}
             </h2>
+            <div className="flex items-center gap-1.5 text-sm font-semibold text-slate-300 mt-1">
+              <span>{clanTag ? `[${clanTag}] ` : ''}{playerName}</span>
+              <VerifiedBadge name={playerName} size="sm" showLabel />
+            </div>
           </div>
 
           <div className="flex items-center gap-4 text-right">

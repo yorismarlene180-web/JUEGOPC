@@ -1,11 +1,16 @@
-export type AccessoryCategory = 'helmet' | 'armor' | 'backpack' | 'weaponSkin' | 'tracer';
+export type AccessoryCategory = 'helmet' | 'armor' | 'pants' | 'backpack' | 'weaponSkin' | 'tracer';
 
 export interface AvatarLoadout {
   helmet: string;
   armor: string;
+  pants: string;
   backpack: string;
   weaponSkin: string;
   tracer: string;
+}
+
+export function isVerifiedPlayer(name?: string): boolean {
+  return Boolean(name && name.trim() === 'RHAAXGTAOFF');
 }
 
 export interface ShopItem {

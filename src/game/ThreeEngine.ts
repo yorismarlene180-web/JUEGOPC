@@ -10,7 +10,7 @@ import type { AvatarLoadout, KillFeedEvent, MatchSummary, RoomPlayerState } from
 import { buildTacticalArena, getGroundHeightAt, resolveObstacleCollision, type ArenaData } from './ArenaBuilder';
 import { buildFirstPersonWeapon, buildOperatorAvatar, type CharacterRig, type FirstPersonWeaponRig } from './AvatarBuilder';
 
-export type EngineViewMode = 'title' | 'shop' | 'playing';
+export type EngineViewMode = 'title' | 'lobby' | 'shop' | 'playing';
 export type BotDifficulty = 'recluta' | 'veterano' | 'elite';
 
 export interface HudSnapshot {
@@ -113,6 +113,29 @@ interface SparkParticle {
   life: number;
 }
 
+interface FireFlameParticle {
+  mesh: THREE.Mesh;
+  mat: THREE.MeshBasicMaterial;
+  vel: THREE.Vector3;
+  life: number;
+  maxLife: number;
+  baseScale: number;
+  swirlPhase: number;
+}
+
+interface FireRingEffect {
+  mesh: THREE.Mesh;
+  mat: THREE.MeshBasicMaterial;
+  life: number;
+  maxLife: number;
+}
+
+interface FireFlashLight {
+  light: THREE.PointLight;
+  life: number;
+  maxLife: number;
+}
+
 export interface EngineCallbacks {
   onHudUpdate: (hud: HudSnapshot) => void;
   onMatchEnd: (summary: MatchSummary) => void;
@@ -199,27 +222,27 @@ const BOT_PROFILES: Array<{ name: string; clanTag: string; loadout: AvatarLoadou
   {
     name: 'Valkiria-01',
     clanTag: 'BOT',
-    loadout: { helmet: 'helmet_amber_recon', armor: 'armor_obsidian', backpack: 'pack_comms_antenna', weaponSkin: 'skin_graphite', tracer: 'tracer_amber' },
+    loadout: { helmet: 'helmet_amber_recon', armor: 'armor_obsidian', pants: 'pants_classic_cargo', backpack: 'pack_comms_antenna', weaponSkin: 'skin_graphite', tracer: 'tracer_amber' },
   },
   {
     name: 'Centinela-02',
     clanTag: 'BOT',
-    loadout: { helmet: 'helmet_crimson_spec', armor: 'armor_cobalt_vanguard', backpack: 'pack_thruster', weaponSkin: 'skin_crimson_alloy', tracer: 'tracer_crimson' },
+    loadout: { helmet: 'helmet_crimson_spec', armor: 'armor_cobalt_vanguard', pants: 'pants_camo_tactical', backpack: 'pack_thruster', weaponSkin: 'skin_crimson_alloy', tracer: 'tracer_crimson' },
   },
   {
     name: 'Lobo-03',
     clanTag: 'BOT',
-    loadout: { helmet: 'helmet_ranger', armor: 'armor_arctic_wolf', backpack: 'pack_standard', weaponSkin: 'skin_desert_sand', tracer: 'tracer_cyan' },
+    loadout: { helmet: 'head_classic_cap', armor: 'top_leather_jacket', pants: 'pants_blue_jeans', backpack: 'pack_standard', weaponSkin: 'skin_desert_sand', tracer: 'tracer_cyan' },
   },
   {
     name: 'Titán-04',
     clanTag: 'BOT',
-    loadout: { helmet: 'helmet_titan_gold', armor: 'armor_apex_gold', backpack: 'pack_thruster', weaponSkin: 'skin_gold_prestige', tracer: 'tracer_emerald' },
+    loadout: { helmet: 'helmet_titan_gold', armor: 'armor_apex_gold', pants: 'pants_white_elite', backpack: 'pack_thruster', weaponSkin: 'skin_gold_prestige', tracer: 'tracer_emerald' },
   },
   {
     name: 'Espectro-05',
     clanTag: 'BOT',
-    loadout: { helmet: 'helmet_crimson_spec', armor: 'armor_obsidian', backpack: 'pack_comms_antenna', weaponSkin: 'skin_graphite', tracer: 'tracer_amber' },
+    loadout: { helmet: 'head_red_beret', armor: 'top_red_hoodie', pants: 'pants_sport_joggers', backpack: 'pack_comms_antenna', weaponSkin: 'skin_graphite', tracer: 'tracer_amber' },
   },
 ];
 
@@ -299,9 +322,12 @@ export class BattlePlayersEngine {
   private matchFinished = false;
   private killFeed: KillFeedEvent[] = [];
 
-  // Showcase avatar (Title / Shop)
+  // Showcase avatar (Title / Lobby / Wardrobe)
   private showcaseRig: CharacterRig | null = null;
-  private shopOrbitYaw = 0.35;
+  private lobbyStageGroup: THREE.Group | null = null;
+  private lobbyStageDisposables: Array<{ dispose: () => void }> = [];
+  private lobbyOrbitRing: THREE.Mesh | null = null;
+  private shopOrbitYaw = 0.25;
   private isDraggingShowcase = false;
   private lastDragX = 0;
   private lastDragY = 0;
@@ -313,17 +339,22 @@ export class BattlePlayersEngine {
   private explosionWaves: ExplosionWave[] = [];
   private raycaster = new THREE.Raycaster();
 
-  // Shared grenade geometries
+  // Shared grenade & fire death geometries
   private grenadeBodyGeo = new THREE.SphereGeometry(0.11, 10, 8);
   private grenadeCapGeo = new THREE.CylinderGeometry(0.04, 0.045, 0.06, 8);
   private grenadeLedGeo = new THREE.SphereGeometry(0.032, 6, 6);
   private waveGeo = new THREE.SphereGeometry(1, 18, 14);
+  private fireFlameGeo = new THREE.SphereGeometry(0.24, 9, 8);
+  private fireRingGeo = new THREE.RingGeometry(0.28, 0.56, 26);
   private grenadeBodyMat = new THREE.MeshStandardMaterial({ color: 0x365314, roughness: 0.65, metalness: 0.4 });
   private grenadeCapMat = new THREE.MeshStandardMaterial({ color: 0x94a3b8, roughness: 0.3, metalness: 0.85 });
 
-  // Pooled tracers & sparks
+  // Pooled tracers, sparks & dynamic fire death effects
   private tracerPool: TracerBeam[] = [];
   private sparkPool: SparkParticle[] = [];
+  private fireFlames: FireFlameParticle[] = [];
+  private fireRings: FireRingEffect[] = [];
+  private fireLights: FireFlashLight[] = [];
   private tracerGeo = new THREE.CylinderGeometry(0.014, 0.014, 1, 6);
   private sparkGeo = new THREE.BoxGeometry(0.06, 0.06, 0.06);
 
@@ -344,6 +375,9 @@ export class BattlePlayersEngine {
   private onMouseMoveBound: (e: MouseEvent) => void;
   private onMouseDownBound: (e: MouseEvent) => void;
   private onMouseUpBound: () => void;
+  private onTouchStartShowcaseBound: (e: TouchEvent) => void;
+  private onTouchMoveShowcaseBound: (e: TouchEvent) => void;
+  private onTouchEndShowcaseBound: () => void;
   private onPointerLockChangeBound: () => void;
   private onBlurBound: () => void;
 
@@ -433,10 +467,11 @@ export class BattlePlayersEngine {
     rimLight.position.set(-26, 18, -28);
     this.scene.add(rimLight);
 
-    // Build Arena
+    // Build Arena & Lobby Pedestal Stage
     this.arena = buildTacticalArena(this.renderer);
     this.scene.add(this.arena.group);
 
+    this.buildLobbyStage();
     this.rebuildShowcaseAvatar();
     this.rebuildFirstPersonWeapon();
 
@@ -466,6 +501,9 @@ export class BattlePlayersEngine {
     this.onMouseMoveBound = this.handleMouseMove.bind(this);
     this.onMouseDownBound = this.handleMouseDown.bind(this);
     this.onMouseUpBound = this.handleMouseUp.bind(this);
+    this.onTouchStartShowcaseBound = this.handleTouchStartShowcase.bind(this);
+    this.onTouchMoveShowcaseBound = this.handleTouchMoveShowcase.bind(this);
+    this.onTouchEndShowcaseBound = this.handleTouchEndShowcase.bind(this);
     this.onPointerLockChangeBound = this.handlePointerLockChange.bind(this);
     this.onBlurBound = this.handleWindowBlur.bind(this);
 
@@ -475,6 +513,9 @@ export class BattlePlayersEngine {
     window.addEventListener('mousemove', this.onMouseMoveBound);
     this.renderer.domElement.addEventListener('mousedown', this.onMouseDownBound);
     window.addEventListener('mouseup', this.onMouseUpBound);
+    this.renderer.domElement.addEventListener('touchstart', this.onTouchStartShowcaseBound, { passive: true });
+    this.renderer.domElement.addEventListener('touchmove', this.onTouchMoveShowcaseBound, { passive: true });
+    window.addEventListener('touchend', this.onTouchEndShowcaseBound);
     document.addEventListener('pointerlockchange', this.onPointerLockChangeBound);
     window.addEventListener('blur', this.onBlurBound);
 
@@ -539,17 +580,29 @@ export class BattlePlayersEngine {
 
   public setViewMode(mode: EngineViewMode) {
     this.viewMode = mode;
+    const w = this.container.clientWidth || window.innerWidth;
+    const h = this.container.clientHeight || window.innerHeight;
+    if (mode === 'shop') {
+      // Shift framing slightly right so left wardrobe drawer never covers the character
+      this.camera.setViewOffset(w, h, -w * 0.14, 0, w, h);
+    } else {
+      this.camera.clearViewOffset();
+    }
+
     if (mode !== 'playing') {
       this.exitPointerLock();
       this.clearBots();
       this.clearRemotePlayers();
       this.clearGrenades();
+      this.clearFireEffects();
       this.lowHealthIntensity = 0;
       this.grenadeShockIntensity = 0;
       if (this.fpWeapon) this.fpWeapon.root.visible = false;
       if (this.showcaseRig) this.showcaseRig.root.visible = true;
+      if (this.lobbyStageGroup) this.lobbyStageGroup.visible = true;
     } else {
       if (this.showcaseRig) this.showcaseRig.root.visible = false;
+      if (this.lobbyStageGroup) this.lobbyStageGroup.visible = false;
       if (this.fpWeapon) this.fpWeapon.root.visible = true;
     }
   }
@@ -741,7 +794,10 @@ export class BattlePlayersEngine {
       soundEngine.playKillConfirm();
     }
     const victim = this.remotePlayers.get(victimId);
-    if (victim) {
+    if (victimId === this.playerId) {
+      this.spawnFireDeathEffect(this.playerPos);
+    } else if (victim) {
+      this.spawnFireDeathEffect(victim.rig.root.position);
       victim.state.alive = false;
       victim.state.deaths += 1;
       victim.rig.root.visible = false;
@@ -811,6 +867,63 @@ export class BattlePlayersEngine {
     this.grenadeShockIntensity = 0;
     this.killFeed = [];
     this.clearGrenades();
+    this.clearFireEffects();
+  }
+
+  private buildLobbyStage() {
+    const group = new THREE.Group();
+    group.position.set(0, 2.0, 0);
+    const track = <T extends { dispose: () => void }>(d: T): T => {
+      this.lobbyStageDisposables.push(d);
+      return d;
+    };
+
+    const baseGeo = track(new THREE.CylinderGeometry(1.45, 1.65, 0.14, 32));
+    const baseMat = track(new THREE.MeshStandardMaterial({ color: 0x0f172a, roughness: 0.35, metalness: 0.78 }));
+    const baseMesh = new THREE.Mesh(baseGeo, baseMat);
+    baseMesh.position.y = -0.07;
+    baseMesh.receiveShadow = true;
+    group.add(baseMesh);
+
+    const glowRingGeo = track(new THREE.RingGeometry(1.18, 1.36, 48));
+    const glowRingMat = track(
+      new THREE.MeshBasicMaterial({
+        color: 0xf59e0b,
+        transparent: true,
+        opacity: 0.88,
+        side: THREE.DoubleSide,
+      }),
+    );
+    const glowRing = new THREE.Mesh(glowRingGeo, glowRingMat);
+    glowRing.rotation.x = -Math.PI / 2;
+    glowRing.position.y = 0.012;
+    group.add(glowRing);
+
+    const innerRingGeo = track(new THREE.RingGeometry(0.78, 0.85, 36));
+    const innerRingMat = track(
+      new THREE.MeshBasicMaterial({
+        color: 0x38bdf8,
+        transparent: true,
+        opacity: 0.72,
+        side: THREE.DoubleSide,
+      }),
+    );
+    const innerRing = new THREE.Mesh(innerRingGeo, innerRingMat);
+    innerRing.rotation.x = -Math.PI / 2;
+    innerRing.position.y = 0.015;
+    group.add(innerRing);
+    this.lobbyOrbitRing = innerRing;
+
+    // Lobby accent lights framing the operator
+    const warmLight = new THREE.PointLight(0xf59e0b, 3.2, 8);
+    warmLight.position.set(1.8, 2.2, 1.8);
+    const coolLight = new THREE.PointLight(0x38bdf8, 2.6, 8);
+    coolLight.position.set(-1.9, 1.8, -1.5);
+    group.add(warmLight, coolLight);
+
+    group.visible = this.viewMode !== 'playing';
+    this.scene.add(group);
+    this.lobbyStageGroup = group;
   }
 
   private rebuildShowcaseAvatar() {
@@ -917,6 +1030,11 @@ export class BattlePlayersEngine {
     const w = this.container.clientWidth || window.innerWidth;
     const h = this.container.clientHeight || window.innerHeight;
     this.camera.aspect = w / h;
+    if (this.viewMode === 'shop') {
+      this.camera.setViewOffset(w, h, -w * 0.14, 0, w, h);
+    } else {
+      this.camera.clearViewOffset();
+    }
     this.camera.updateProjectionMatrix();
     this.renderer.setSize(w, h);
     if (this.composer) {
@@ -993,7 +1111,7 @@ export class BattlePlayersEngine {
   }
 
   private handleMouseDown(e: MouseEvent) {
-    if (this.viewMode === 'shop') {
+    if (this.viewMode === 'shop' || this.viewMode === 'lobby') {
       this.isDraggingShowcase = true;
       this.lastDragX = e.clientX;
       return;
@@ -1016,8 +1134,29 @@ export class BattlePlayersEngine {
     this.isDraggingShowcase = false;
   }
 
+  private handleTouchStartShowcase(e: TouchEvent) {
+    if ((this.viewMode === 'lobby' || this.viewMode === 'shop') && e.touches.length === 1) {
+      this.isDraggingShowcase = true;
+      this.lastDragX = e.touches[0].clientX;
+    }
+  }
+
+  private handleTouchMoveShowcase(e: TouchEvent) {
+    if ((this.viewMode === 'lobby' || this.viewMode === 'shop') && this.isDraggingShowcase && e.touches.length === 1) {
+      const dx = e.touches[0].clientX - this.lastDragX;
+      this.lastDragX = e.touches[0].clientX;
+      this.shopOrbitYaw += dx * 0.012;
+    }
+  }
+
+  private handleTouchEndShowcase() {
+    if (this.viewMode !== 'playing') {
+      this.isDraggingShowcase = false;
+    }
+  }
+
   private handleMouseMove(e: MouseEvent) {
-    if (this.viewMode === 'shop' && this.isDraggingShowcase) {
+    if ((this.viewMode === 'shop' || this.viewMode === 'lobby') && this.isDraggingShowcase) {
       const dx = e.clientX - this.lastDragX;
       this.lastDragX = e.clientX;
       this.shopOrbitYaw += dx * 0.01;
@@ -1151,19 +1290,20 @@ export class BattlePlayersEngine {
           this.hp = Math.max(0, this.hp - dmg);
           this.damageFlash = 0.9;
           soundEngine.playDamage();
-          if (this.hp <= 0) {
-            this.alive = false;
-            this.deaths += 1;
-            this.respawnTimer = 3.0;
-            const killerBot = this.bots.find((b) => b.id === g.ownerId);
-            if (killerBot) {
-              killerBot.kills += 1;
-              killerBot.score += 125;
+            if (this.hp <= 0) {
+              this.spawnFireDeathEffect(this.playerPos);
+              this.alive = false;
+              this.deaths += 1;
+              this.respawnTimer = 3.0;
+              const killerBot = this.bots.find((b) => b.id === g.ownerId);
+              if (killerBot) {
+                killerBot.kills += 1;
+                killerBot.score += 125;
+              }
+              this.pushKillFeed(g.isLocalOwner ? 'Granada' : g.ownerName, this.playerName, false);
             }
-            this.pushKillFeed(g.isLocalOwner ? 'Granada' : g.ownerName, this.playerName, false);
           }
         }
-      }
 
       for (const bot of this.bots) {
         if (!bot.alive) continue;
@@ -1179,6 +1319,7 @@ export class BattlePlayersEngine {
               this.hitmarkerTimer = 0.16;
             }
             if (bot.hp <= 0) {
+              this.spawnFireDeathEffect(bot.pos);
               bot.alive = false;
               bot.deaths += 1;
               bot.respawnTimer = 3.0;
@@ -1366,6 +1507,7 @@ export class BattlePlayersEngine {
           this.damageDealt += dmg;
           bot.hitFlashTimer = 0.12;
           if (bot.hp <= 0) {
+            this.spawnFireDeathEffect(bot.pos);
             bot.alive = false;
             bot.deaths += 1;
             bot.respawnTimer = 3.0;
@@ -1436,6 +1578,90 @@ export class BattlePlayersEngine {
     }
   }
 
+  private spawnFireDeathEffect(pos: THREE.Vector3) {
+    soundEngine.playFireDeath();
+    this.spawnSparks(new THREE.Vector3(pos.x, pos.y + 0.9, pos.z), '#fb923c', 14);
+
+    // Rising swirling flame plumes
+    const palette = [0xfef08a, 0xf97316, 0xef4444, 0xfb923c];
+    for (let i = 0; i < 18; i++) {
+      const mat = new THREE.MeshBasicMaterial({
+        color: palette[i % palette.length],
+        transparent: true,
+        opacity: 0.92,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false,
+      });
+      const mesh = new THREE.Mesh(this.fireFlameGeo, mat);
+      const angle = (i / 18) * Math.PI * 2 + Math.random() * 0.4;
+      const r = Math.random() * 0.36;
+      mesh.position.set(
+        pos.x + Math.cos(angle) * r,
+        pos.y + 0.25 + Math.random() * 1.15,
+        pos.z + Math.sin(angle) * r,
+      );
+      const baseScale = 0.65 + Math.random() * 0.9;
+      mesh.scale.setScalar(baseScale);
+      this.scene.add(mesh);
+
+      const maxLife = 0.65 + Math.random() * 0.55;
+      this.fireFlames.push({
+        mesh,
+        mat,
+        vel: new THREE.Vector3(
+          Math.cos(angle) * (0.6 + Math.random() * 1.2),
+          2.2 + Math.random() * 2.8,
+          Math.sin(angle) * (0.6 + Math.random() * 1.2),
+        ),
+        life: maxLife,
+        maxLife,
+        baseScale,
+        swirlPhase: Math.random() * Math.PI * 2,
+      });
+    }
+
+    // Expanding ground fire ring
+    const ringMat = new THREE.MeshBasicMaterial({
+      color: 0xff6b1a,
+      transparent: true,
+      opacity: 0.9,
+      side: THREE.DoubleSide,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+    });
+    const ringMesh = new THREE.Mesh(this.fireRingGeo, ringMat);
+    ringMesh.rotation.x = -Math.PI / 2;
+    ringMesh.position.set(pos.x, pos.y + 0.06, pos.z);
+    this.scene.add(ringMesh);
+    this.fireRings.push({ mesh: ringMesh, mat: ringMat, life: 0.85, maxLife: 0.85 });
+
+    // Dynamic fire illumination flash
+    if (!this.isSoftwareGl) {
+      const light = new THREE.PointLight(0xff5a1f, 6.0, 12);
+      light.position.set(pos.x, pos.y + 1.1, pos.z);
+      this.scene.add(light);
+      this.fireLights.push({ light, life: 0.9, maxLife: 0.9 });
+    }
+  }
+
+  private clearFireEffects() {
+    for (const f of this.fireFlames) {
+      this.scene.remove(f.mesh);
+      f.mat.dispose();
+    }
+    this.fireFlames = [];
+    for (const r of this.fireRings) {
+      this.scene.remove(r.mesh);
+      r.mat.dispose();
+    }
+    this.fireRings = [];
+    for (const l of this.fireLights) {
+      this.scene.remove(l.light);
+      l.light.dispose();
+    }
+    this.fireLights = [];
+  }
+
   private updateEffects(dt: number) {
     for (const t of this.tracerPool) {
       if (t.life > 0) {
@@ -1451,6 +1677,49 @@ export class BattlePlayersEngine {
         s.mesh.position.addScaledVector(s.vel, dt);
         if (s.life <= 0) s.mesh.visible = false;
       }
+    }
+    for (let i = this.fireFlames.length - 1; i >= 0; i--) {
+      const f = this.fireFlames[i];
+      f.life -= dt;
+      if (f.life <= 0) {
+        this.scene.remove(f.mesh);
+        f.mat.dispose();
+        this.fireFlames.splice(i, 1);
+        continue;
+      }
+      const progress = 1 - f.life / f.maxLife;
+      f.swirlPhase += dt * 10;
+      f.mesh.position.x += (f.vel.x + Math.cos(f.swirlPhase) * 0.5) * dt;
+      f.mesh.position.y += f.vel.y * dt;
+      f.mesh.position.z += (f.vel.z + Math.sin(f.swirlPhase) * 0.5) * dt;
+      const scaleCurve = progress < 0.3 ? 0.8 + progress * 2.2 : Math.max(0.05, 1.45 * (1 - (progress - 0.3) / 0.7));
+      f.mesh.scale.set(f.baseScale * scaleCurve, f.baseScale * scaleCurve * 1.45, f.baseScale * scaleCurve);
+      f.mat.opacity = Math.max(0, (1 - progress) * 0.92);
+    }
+    for (let i = this.fireRings.length - 1; i >= 0; i--) {
+      const r = this.fireRings[i];
+      r.life -= dt;
+      if (r.life <= 0) {
+        this.scene.remove(r.mesh);
+        r.mat.dispose();
+        this.fireRings.splice(i, 1);
+        continue;
+      }
+      const progress = 1 - r.life / r.maxLife;
+      r.mesh.scale.setScalar(0.8 + progress * 3.8);
+      r.mat.opacity = Math.max(0, (1 - progress) * 0.9);
+    }
+    for (let i = this.fireLights.length - 1; i >= 0; i--) {
+      const l = this.fireLights[i];
+      l.life -= dt;
+      if (l.life <= 0) {
+        this.scene.remove(l.light);
+        l.light.dispose();
+        this.fireLights.splice(i, 1);
+        continue;
+      }
+      const ratio = l.life / l.maxLife;
+      l.light.intensity = ratio * (5.2 + Math.sin(performance.now() * 0.04) * 1.2);
     }
   }
 
@@ -1754,6 +2023,7 @@ export class BattlePlayersEngine {
                   this.cameraShake = Math.max(this.cameraShake, 0.085);
                   soundEngine.playDamage();
                   if (this.hp <= 0) {
+                    this.spawnFireDeathEffect(this.playerPos);
                     this.alive = false;
                     this.deaths += 1;
                     this.respawnTimer = 3.0;
@@ -1769,6 +2039,7 @@ export class BattlePlayersEngine {
                   chosenBot.hitFlashTimer = 0.12;
                   this.spawnSparks(shotEnd, '#ef4444', 4);
                   if (chosenBot.hp <= 0) {
+                    this.spawnFireDeathEffect(chosenBot.pos);
                     chosenBot.alive = false;
                     chosenBot.deaths += 1;
                     chosenBot.respawnTimer = 3.0;
@@ -1995,18 +2266,20 @@ export class BattlePlayersEngine {
       if (this.showcaseRig) {
         this.showcaseRig.root.rotation.y = Math.sin(elapsed * 0.5) * 0.35;
       }
-    } else if (this.viewMode === 'shop') {
-      if (!this.isDraggingShowcase) {
-        this.shopOrbitYaw += dt * 0.38;
-      }
-      const camX = Math.sin(this.shopOrbitYaw) * 3.1;
-      const camZ = Math.cos(this.shopOrbitYaw) * 3.1;
+    } else if (this.viewMode === 'lobby' || this.viewMode === 'shop') {
+      const dist = this.viewMode === 'lobby' ? 3.55 : 3.2;
+      const camX = Math.sin(this.shopOrbitYaw) * dist;
+      const camZ = Math.cos(this.shopOrbitYaw) * dist;
       this.camera.position.x = THREE.MathUtils.damp(this.camera.position.x, camX, 6, dt);
-      this.camera.position.y = THREE.MathUtils.damp(this.camera.position.y, 3.25, 6, dt);
+      this.camera.position.y = THREE.MathUtils.damp(this.camera.position.y, 3.18, 6, dt);
       this.camera.position.z = THREE.MathUtils.damp(this.camera.position.z, camZ, 6, dt);
-      this.camera.lookAt(0, 3.0, 0);
+      this.camera.lookAt(0, 2.95, 0);
       if (this.showcaseRig) {
         this.showcaseRig.root.rotation.y = 0;
+        this.showcaseRig.bodyGroup.position.y = Math.sin(elapsed * 2.0) * 0.015;
+      }
+      if (this.lobbyOrbitRing) {
+        this.lobbyOrbitRing.rotation.z = elapsed * 0.45;
       }
     } else if (this.viewMode === 'playing') {
       if (this.hitstopTimer > 0) {
@@ -2052,19 +2325,26 @@ export class BattlePlayersEngine {
     window.removeEventListener('mousemove', this.onMouseMoveBound);
     this.renderer.domElement.removeEventListener('mousedown', this.onMouseDownBound);
     window.removeEventListener('mouseup', this.onMouseUpBound);
+    this.renderer.domElement.removeEventListener('touchstart', this.onTouchStartShowcaseBound);
+    this.renderer.domElement.removeEventListener('touchmove', this.onTouchMoveShowcaseBound);
+    window.removeEventListener('touchend', this.onTouchEndShowcaseBound);
     document.removeEventListener('pointerlockchange', this.onPointerLockChangeBound);
     window.removeEventListener('blur', this.onBlurBound);
 
     this.clearBots();
     this.clearRemotePlayers();
     this.clearGrenades();
+    this.clearFireEffects();
     this.showcaseRig?.dispose();
+    this.lobbyStageDisposables.forEach((d) => d.dispose());
     this.fpWeapon?.dispose();
     this.arena.dispose();
     this.grenadeBodyGeo.dispose();
     this.grenadeCapGeo.dispose();
     this.grenadeLedGeo.dispose();
     this.waveGeo.dispose();
+    this.fireFlameGeo.dispose();
+    this.fireRingGeo.dispose();
     this.grenadeBodyMat.dispose();
     this.grenadeCapMat.dispose();
     this.tracerGeo.dispose();

@@ -4,7 +4,6 @@ import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { WebSocketServer, WebSocket } from 'ws';
-import JSZip from 'jszip';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -16,6 +15,7 @@ const DB_FILE = path.join(DATA_DIR, 'battleplayers-db.json');
 interface AvatarLoadout {
   helmet: string;
   armor: string;
+  pants: string;
   backpack: string;
   weaponSkin: string;
   tracer: string;
@@ -118,11 +118,13 @@ interface PersistedState {
   globalChat: ChatMessage[];
   players: Record<string, PlayerDirectoryEntry>;
   friendships: Record<string, string[]>;
+  profiles: Record<string, Record<string, unknown>>;
 }
 
 const DEFAULT_LOADOUT: AvatarLoadout = {
-  helmet: 'helmet_ranger',
-  armor: 'armor_obsidian',
+  helmet: 'head_classic_cap',
+  armor: 'top_classic_tee',
+  pants: 'pants_classic_cargo',
   backpack: 'pack_standard',
   weaponSkin: 'skin_graphite',
   tracer: 'tracer_amber',
@@ -209,6 +211,7 @@ function createSeedState(): PersistedState {
     ],
     players: {},
     friendships: {},
+    profiles: {},
   };
 }
 
@@ -224,6 +227,7 @@ function loadState(): PersistedState {
           globalChat: Array.isArray(parsed.globalChat) ? parsed.globalChat : [],
           players: parsed.players && typeof parsed.players === 'object' ? parsed.players : {},
           friendships: parsed.friendships && typeof parsed.friendships === 'object' ? parsed.friendships : {},
+          profiles: parsed.profiles && typeof parsed.profiles === 'object' ? parsed.profiles : {},
         };
       }
     }
@@ -491,7 +495,8 @@ function applyMatchReport(body: {
 
 async function startServer() {
   const app = express();
-  app.use(express.json());
+  app.use(express.json({ limit: '1mb' }));
+  app.use(express.text({ type: 'text/plain', limit: '1mb' }));
 
   const server = http.createServer(app);
   const wss = new WebSocketServer({ server });
@@ -656,202 +661,55 @@ async function startServer() {
     res.json({ ok: true, friends: buildFriendsList(playerId) });
   });
 
-  // Downloadable Windows (.exe builder via Electron) & Android (.apk builder via Capacitor) Kit
-  app.get('/api/download/native-kit', async (req, res) => {
-    try {
-      const forwardedProto = String(req.headers['x-forwarded-proto'] || req.protocol || 'https').split(',')[0].trim();
-      const host = String(req.headers['x-forwarded-host'] || req.headers.host || 'localhost:3000').split(',')[0].trim();
-      const originUrl = process.env.APP_URL || `${forwardedProto}://${host}`;
-
-      const zip = new JSZip();
-
-      // 1. Windows Electron (.exe) Wrapper
-      const winFolder = zip.folder('windows-exe')!;
-      winFolder.file(
-        'package.json',
-        JSON.stringify(
-          {
-            name: 'battleplayers-desktop',
-            version: '1.0.0',
-            description: 'BATTLEPLAYERS 3D Tactical Shooter for Windows PC',
-            main: 'main.cjs',
-            scripts: {
-              start: 'electron .',
-              'build:exe': 'electron-builder --win nsis',
-            },
-            build: {
-              appId: 'com.battleplayers.desktop',
-              productName: 'BATTLEPLAYERS',
-              win: {
-                target: ['nsis', 'portable'],
-                icon: 'icon.png',
-              },
-              nsis: {
-                oneClick: false,
-                allowToChangeInstallationDirectory: true,
-              },
-            },
-            devDependencies: {
-              electron: '^33.2.0',
-              'electron-builder': '^25.1.8',
-            },
-          },
-          null,
-          2,
-        ),
-      );
-
-      winFolder.file(
-        'main.cjs',
-        `const { app, BrowserWindow, session } = require('electron');
-
-const GAME_URL = ${JSON.stringify(originUrl)};
-
-function createWindow() {
-  const win = new BrowserWindow({
-    width: 1440,
-    height: 900,
-    minWidth: 1024,
-    minHeight: 640,
-    title: 'BATTLEPLAYERS',
-    backgroundColor: '#0a0d12',
-    autoHideMenuBar: true,
-    webPreferences: {
-      nodeIntegration: false,
-      contextIsolation: true,
-    },
-  });
-
-  session.defaultSession.setPermissionRequestHandler((_webContents, permission, callback) => {
-    if (permission === 'media' || permission === 'fullscreen' || permission === 'pointerLock') {
-      callback(true);
+  // Full Player Profile Persistence Endpoints (survives browser close & restarts)
+  app.get('/api/profile/:playerId', (req, res) => {
+    const playerId = String(req.params.playerId || '').trim();
+    const lookupName = String(req.query.name || '').trim();
+    if (!playerId && !lookupName) {
+      res.status(400).json({ error: 'ID inválido.' });
       return;
     }
-    callback(false);
+    let found = playerId ? db.profiles[playerId] || null : null;
+    if (!found && lookupName) {
+      const byName = Object.values(db.profiles).find(
+        (p) => typeof p.name === 'string' && p.name.trim() === lookupName,
+      );
+      if (byName) found = byName;
+    }
+    res.json({ profile: found });
   });
 
-  win.loadURL(GAME_URL);
-}
-
-app.whenReady().then(createWindow);
-app.on('window-all-closed', () => {
-  if (process.platform !== 'darwin') app.quit();
-});
-`,
-      );
-
-      winFolder.file(
-        'CREAR-EXE-WINDOWS.bat',
-        `@echo off
-echo Instalando dependencias para generar BATTLEPLAYERS.exe...
-call npm install
-if errorlevel 1 exit /b 1
-echo Compilando instalador .exe en carpeta dist\\ ...
-call npm run build:exe
-pause
-`,
-      );
-
-      // 2. Android Capacitor (.apk) Horizontal Fullscreen Wrapper
-      const androidFolder = zip.folder('android-apk')!;
-      androidFolder.file(
-        'package.json',
-        JSON.stringify(
-          {
-            name: 'battleplayers-android',
-            version: '1.0.0',
-            description: 'BATTLEPLAYERS Android Landscape Shooter',
-            scripts: {
-              'init:android': 'npx cap add android && npx cap sync android',
-              'open:studio': 'npx cap open android',
-            },
-            dependencies: {
-              '@capacitor/core': '^6.2.0',
-              '@capacitor/android': '^6.2.0',
-            },
-            devDependencies: {
-              '@capacitor/cli': '^6.2.0',
-            },
-          },
-          null,
-          2,
-        ),
-      );
-
-      androidFolder.file(
-        'capacitor.config.json',
-        JSON.stringify(
-          {
-            appId: 'com.battleplayers.android',
-            appName: 'BATTLEPLAYERS',
-            webDir: 'www',
-            server: {
-              url: originUrl,
-              cleartext: false,
-            },
-            android: {
-              allowMixedContent: false,
-              backgroundColor: '#0a0d12',
-            },
-          },
-          null,
-          2,
-        ),
-      );
-
-      const wwwFolder = androidFolder.folder('www')!;
-      wwwFolder.file(
-        'index.html',
-        `<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="refresh" content="0;url=${originUrl}"></head><body style="background:#0a0d12;color:#fff;font-family:sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;">Cargando BATTLEPLAYERS...</body></html>`,
-      );
-
-      androidFolder.file(
-        'AndroidManifest-ORIENTATION-LANDSCAPE.txt',
-        `En android/app/src/main/AndroidManifest.xml dentro de <activity android:name=".MainActivity"...>, agrega:
-android:screenOrientation="sensorLandscape"
-y permisos de microfono e internet:
-<uses-permission android:name="android.permission.INTERNET" />
-<uses-permission android:name="android.permission.RECORD_AUDIO" />
-<uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />`,
-      );
-
-      // Attach PNG icon if present
-      const iconPath = path.join(__dirname, 'public', 'pwa-512x512.png');
-      if (fs.existsSync(iconPath)) {
-        const iconBuf = fs.readFileSync(iconPath);
-        winFolder.file('icon.png', iconBuf);
-        androidFolder.file('icon.png', iconBuf);
+  app.post('/api/profile/sync', (req, res) => {
+    let body: Record<string, unknown> = {};
+    if (typeof req.body === 'string') {
+      try {
+        body = JSON.parse(req.body) as Record<string, unknown>;
+      } catch {
+        res.status(400).json({ error: 'JSON inválido.' });
+        return;
       }
-
-      zip.file(
-        'INSTRUCCIONES.txt',
-        `BATTLEPLAYERS — KIT NATIVO WINDOWS (.EXE) Y ANDROID (.APK)
-Servidor en linea configurado: ${originUrl}
-
-1) PARA WINDOWS (.EXE):
-   - Abre la carpeta "windows-exe".
-   - Asegurate de tener Node.js instalado en Windows.
-   - Haz doble clic en "CREAR-EXE-WINDOWS.bat" (o ejecuta: npm install && npm run build:exe).
-   - Tu instalador .exe y version portable se generaran en "windows-exe/dist/".
-
-2) PARA ANDROID (.APK EN HORIZONTAL):
-   - Abre la carpeta "android-apk".
-   - Ejecuta: npm install && npm run init:android
-   - Aplica sensorLandscape en AndroidManifest.xml (ver AndroidManifest-ORIENTATION-LANDSCAPE.txt).
-   - Abre en Android Studio con: npm run open:studio y selecciona Build -> Build APK(s).
-
-NOTA: Tambien puedes instalar BATTLEPLAYERS en 1 clic directamente desde Chrome/Edge en Windows o Android sin compilar nada usando el boton "Instalar App" dentro del juego.
-`,
-      );
-
-      const zipBuffer = await zip.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE' });
-      res.setHeader('Content-Type', 'application/zip');
-      res.setHeader('Content-Disposition', 'attachment; filename="BATTLEPLAYERS-Windows-EXE-Android-APK-Kit.zip"');
-      res.send(zipBuffer);
-    } catch (err) {
-      console.error('Failed to build native kit zip', err);
-      res.status(500).json({ error: 'No se pudo generar el paquete descargable.' });
+    } else if (req.body && typeof req.body === 'object') {
+      body = req.body as Record<string, unknown>;
     }
+
+    const playerId = String(body.id || '').trim().slice(0, 40);
+    if (!playerId) {
+      res.status(400).json({ error: 'ID de jugador requerido.' });
+      return;
+    }
+
+    const cleanName = String(body.name || 'Operador_PC').slice(0, 20);
+    const cleanClanTag = String(body.clanTag || '').slice(0, 4).toUpperCase();
+    db.profiles[playerId] = {
+      ...body,
+      id: playerId,
+      name: cleanName,
+      clanTag: cleanClanTag,
+      updatedAt: Date.now(),
+    };
+    upsertPlayerDirectory(playerId, cleanName, cleanClanTag);
+    saveState(db);
+    res.json({ ok: true });
   });
 
   // Authoritative 20Hz respawn & round timer loop
@@ -1005,7 +863,15 @@ NOTA: Tambien puedes instalar BATTLEPLAYERS en 1 clic directamente desde Chrome/
         const playerId = String(msg.playerId || meta.playerId);
         const name = String(msg.name || 'Operador').slice(0, 20);
         const clanTag = String(msg.clanTag || '').slice(0, 4).toUpperCase();
-        const loadout = (msg.loadout as AvatarLoadout) || DEFAULT_LOADOUT;
+        const rawLoadout = (msg.loadout as Partial<AvatarLoadout>) || {};
+        const loadout: AvatarLoadout = {
+          helmet: rawLoadout.helmet || DEFAULT_LOADOUT.helmet,
+          armor: rawLoadout.armor || DEFAULT_LOADOUT.armor,
+          pants: rawLoadout.pants || DEFAULT_LOADOUT.pants,
+          backpack: rawLoadout.backpack || DEFAULT_LOADOUT.backpack,
+          weaponSkin: rawLoadout.weaponSkin || DEFAULT_LOADOUT.weaponSkin,
+          tracer: rawLoadout.tracer || DEFAULT_LOADOUT.tracer,
+        };
 
         // Leave previous room if any
         if (meta.roomCode && rooms.has(meta.roomCode)) {

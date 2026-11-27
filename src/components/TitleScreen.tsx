@@ -1,5 +1,6 @@
 import React, { useEffect } from 'react';
-import { Crosshair, Download, Maximize2, Play, Shield, Users, Wifi } from 'lucide-react';
+import { Crosshair, Maximize2, Play, Shield, Users, Wifi } from 'lucide-react';
+import { VerifiedBadge } from './VerifiedBadge';
 
 interface TitleScreenProps {
   playerName: string;
@@ -8,7 +9,6 @@ interface TitleScreenProps {
   onEnterMenu: () => void;
   onQuickPlayBots: () => void;
   onRequestFullscreenLandscape: () => void;
-  onOpenInstallModal: () => void;
 }
 
 export const TitleScreen: React.FC<TitleScreenProps> = ({
@@ -18,7 +18,6 @@ export const TitleScreen: React.FC<TitleScreenProps> = ({
   onEnterMenu,
   onQuickPlayBots,
   onRequestFullscreenLandscape,
-  onOpenInstallModal,
 }) => {
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
@@ -95,14 +94,17 @@ export const TitleScreen: React.FC<TitleScreenProps> = ({
         </div>
 
         <p className="text-slate-300 text-sm md:text-base leading-relaxed mb-5 max-w-lg">
-          Compite en línea contra escuadrones de bots que luchan entre sí o en salas multijugador con amigos. Incluye granadas de fragmentación, chat con micrófono, tienda 3D, clanes y clasificación global.
+          Compite en línea contra escuadrones de bots que luchan entre sí o en salas multijugador con amigos. Incluye granadas de fragmentación, chat con micrófono, ropa clásica 3D, clanes y clasificación global.
         </p>
 
         {/* Callsign Input */}
         <div className="mb-4 max-w-sm">
-          <label htmlFor="bp-callsign" className="block text-xs font-medium text-slate-400 mb-1">
-            Nombre de Operador
-          </label>
+          <div className="flex items-center justify-between mb-1">
+            <label htmlFor="bp-callsign" className="block text-xs font-medium text-slate-400">
+              Nombre de Operador
+            </label>
+            <VerifiedBadge name={playerName} size="xs" showLabel />
+          </div>
           <input
             id="bp-callsign"
             type="text"
@@ -121,7 +123,7 @@ export const TitleScreen: React.FC<TitleScreenProps> = ({
             className="flex items-center gap-2 px-5 py-3 rounded-lg bg-amber-500 hover:bg-amber-400 text-slate-950 font-display font-bold text-sm md:text-base tracking-wide transition-colors cursor-pointer whitespace-nowrap shrink-0"
           >
             <Play className="w-4 h-4 fill-current" />
-            Entrar al Centro Táctico
+            Entrar al Lobby
           </button>
 
           <button
@@ -130,14 +132,6 @@ export const TitleScreen: React.FC<TitleScreenProps> = ({
           >
             <Crosshair className="w-4 h-4 text-amber-400" />
             Partida Rápida (Bots en Línea)
-          </button>
-
-          <button
-            onClick={onOpenInstallModal}
-            className="flex items-center gap-2 px-4 py-3 rounded-lg bg-[#161e2c] hover:bg-[#1f293b] border border-sky-500/50 text-sky-300 font-semibold text-xs md:text-sm transition-colors cursor-pointer whitespace-nowrap shrink-0"
-          >
-            <Download className="w-4 h-4" />
-            Descargar PC / Android
           </button>
         </div>
 

@@ -18,6 +18,7 @@ import {
 import type { VoiceStatus } from '../audio/voiceChat';
 import type { HudSnapshot } from '../game/ThreeEngine';
 import type { ChatMessage } from '../types/game';
+import { VerifiedBadge } from './VerifiedBadge';
 
 interface GameHUDProps {
   hud: HudSnapshot;
@@ -299,9 +300,15 @@ export const GameHUD: React.FC<GameHUDProps> = ({
               key={kf.id}
               className="flex items-center gap-1.5 px-2 py-0.5 rounded bg-[#0b0f17]/80 border border-slate-800 text-[11px] md:text-xs"
             >
-              <span className="font-semibold text-amber-300">{kf.killerName}</span>
+              <span className="inline-flex items-center gap-1 font-semibold text-amber-300">
+                {kf.killerName}
+                <VerifiedBadge name={kf.killerName} size="xs" />
+              </span>
               <Skull className={`w-3 h-3 ${kf.headshot ? 'text-red-400' : 'text-slate-400'}`} />
-              <span className="text-slate-200">{kf.victimName}</span>
+              <span className="inline-flex items-center gap-1 text-slate-200">
+                {kf.victimName}
+                <VerifiedBadge name={kf.victimName} size="xs" />
+              </span>
               {kf.headshot && <span className="text-[10px] font-bold text-red-400">HS</span>}
             </div>
           ))}
@@ -401,9 +408,11 @@ export const GameHUD: React.FC<GameHUDProps> = ({
             <div className="space-y-1 max-h-20 overflow-y-auto text-xs">
               {chatMessages.slice(-4).map((m) => (
                 <div key={m.id} className="leading-snug">
-                  <span className="font-semibold text-amber-300">
+                  <span className="inline-flex items-center gap-1 font-semibold text-amber-300">
                     {m.clanTag ? `[${m.clanTag}] ` : ''}
-                    {m.senderName}:{' '}
+                    {m.senderName}
+                    <VerifiedBadge name={m.senderName} size="xs" />
+                    <span>: </span>
                   </span>
                   <span className="text-slate-200">{m.text}</span>
                 </div>
@@ -617,8 +626,13 @@ export const GameHUD: React.FC<GameHUDProps> = ({
                   >
                     <td className="py-2 font-mono-num">{idx + 1}</td>
                     <td className="py-2">
-                      {row.clanTag ? `[${row.clanTag}] ` : ''}
-                      {row.name}
+                      <span className="inline-flex items-center gap-1.5">
+                        <span>
+                          {row.clanTag ? `[${row.clanTag}] ` : ''}
+                          {row.name}
+                        </span>
+                        <VerifiedBadge name={row.name} size="xs" />
+                      </span>
                       {row.isSpeaking && <span className="ml-2 text-xs text-emerald-400">Hablando</span>}
                     </td>
                     <td className="py-2 text-right font-mono-num">{row.kills}</td>

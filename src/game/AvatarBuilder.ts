@@ -46,6 +46,7 @@ export function buildOperatorAvatar(
 ): CharacterRig {
   const helmetSpec = getShopItem(loadout.helmet);
   const armorSpec = getShopItem(loadout.armor);
+  const pantsSpec = getShopItem(loadout.pants || 'pants_classic_cargo');
   const packSpec = getShopItem(loadout.backpack);
   const weaponSpec = getShopItem(loadout.weaponSkin);
 
@@ -66,8 +67,11 @@ export function buildOperatorAvatar(
     return m;
   };
 
-  // Materials with deliberate roughness/metalness contrast (>= 0.25 diff between armor & cloth)
+  // Materials with deliberate roughness/metalness contrast
+  const skinMat = trackMat(makeMat('#d29973', 0.78, 0.04));
   const undersuitMat = trackMat(makeMat('#1a202c', 0.85, 0.08));
+  const pantsPrimaryMat = trackMat(makeMat(pantsSpec.primaryColor, pantsSpec.roughness, pantsSpec.metalness));
+  const pantsAccentMat = trackMat(makeMat(pantsSpec.accentColor, Math.max(0.25, pantsSpec.roughness - 0.15), Math.min(0.6, pantsSpec.metalness + 0.1)));
   const armorPrimaryMat = trackMat(
     makeMat(teamTint || armorSpec.primaryColor, armorSpec.roughness, armorSpec.metalness),
   );
@@ -76,7 +80,7 @@ export function buildOperatorAvatar(
   );
   const helmetMat = trackMat(makeMat(helmetSpec.primaryColor, helmetSpec.roughness, helmetSpec.metalness));
   const visorMat = trackMat(
-    makeMat(helmetSpec.accentColor, 0.12, 0.9, helmetSpec.emissive || helmetSpec.accentColor, 1.3),
+    makeMat(helmetSpec.accentColor, 0.12, 0.9, helmetSpec.emissive || helmetSpec.accentColor, helmetSpec.emissive ? 1.2 : 0),
   );
   const packMat = trackMat(makeMat(packSpec.primaryColor, packSpec.roughness, packSpec.metalness));
   const packAccentMat = trackMat(
@@ -84,7 +88,8 @@ export function buildOperatorAvatar(
   );
   const gunPrimaryMat = trackMat(makeMat(weaponSpec.primaryColor, weaponSpec.roughness, weaponSpec.metalness));
   const gunDarkMat = trackMat(makeMat('#0f172a', 0.42, 0.82));
-  const bootMat = trackMat(makeMat('#111827', 0.78, 0.15));
+  const isSneakers = loadout.pants === 'pants_blue_jeans' || loadout.pants === 'pants_sport_joggers' || loadout.pants === 'pants_white_elite';
+  const bootMat = trackMat(makeMat(isSneakers ? pantsSpec.accentColor : '#111827', isSneakers ? 0.52 : 0.78, 0.12));
 
   const tagMesh = (mesh: THREE.Mesh, isHead = false) => {
     mesh.castShadow = true;
@@ -93,20 +98,32 @@ export function buildOperatorAvatar(
     mesh.userData.isHead = isHead;
   };
 
-  // Legs (grounded at y = 0)
+  // Legs & Classic Pants + Footwear (grounded at y = 0)
   const createLeg = (xOffset: number) => {
     const leg = new THREE.Group();
     leg.position.set(xOffset, 0.82, 0);
 
-    const thigh = new THREE.Mesh(trackGeo(new THREE.CapsuleGeometry(0.11, 0.26, 4, 8)), undersuitMat);
+    const thigh = new THREE.Mesh(trackGeo(new THREE.CapsuleGeometry(0.11, 0.26, 4, 8)), pantsPrimaryMat);
     thigh.position.y = -0.22;
     tagMesh(thigh);
     leg.add(thigh);
 
-    const shinGuard = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(0.19, 0.34, 0.2)), armorPrimaryMat);
-    shinGuard.position.set(0, -0.52, 0.01);
-    tagMesh(shinGuard);
-    leg.add(shinGuard);
+    const lowerLeg = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(0.19, 0.34, 0.2)), pantsPrimaryMat);
+    lowerLeg.position.set(0, -0.52, 0.01);
+    tagMesh(lowerLeg);
+    leg.add(lowerLeg);
+
+    if (loadout.pants === 'pants_classic_cargo' || loadout.pants === 'pants_camo_tactical') {
+      const pocket = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(0.22, 0.14, 0.14)), pantsAccentMat);
+      pocket.position.set(xOffset < 0 ? -0.02 : 0.02, -0.26, 0.02);
+      tagMesh(pocket);
+      leg.add(pocket);
+    } else if (loadout.pants === 'pants_sport_joggers' || loadout.pants === 'pants_white_elite') {
+      const stripe = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(0.03, 0.56, 0.04)), pantsAccentMat);
+      stripe.position.set(xOffset < 0 ? -0.1 : 0.1, -0.36, 0.01);
+      tagMesh(stripe);
+      leg.add(stripe);
+    }
 
     const boot = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(0.2, 0.14, 0.3)), bootMat);
     boot.position.set(0, -0.75, 0.04);
@@ -121,83 +138,185 @@ export function buildOperatorAvatar(
   bodyGroup.add(leftLeg, rightLeg);
 
   // Pelvis & Belt
-  const pelvis = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(0.48, 0.18, 0.28)), undersuitMat);
+  const pelvis = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(0.48, 0.18, 0.28)), pantsPrimaryMat);
   pelvis.position.y = 0.86;
   tagMesh(pelvis);
   bodyGroup.add(pelvis);
 
-  // Torso & Tactical Vest
+  const belt = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(0.5, 0.055, 0.3)), gunDarkMat);
+  belt.position.y = 0.94;
+  tagMesh(belt);
+  bodyGroup.add(belt);
+
+  // Torso: Classic Clothing vs Tactical Armor
+  const isClassicTop =
+    loadout.armor === 'top_classic_tee' ||
+    loadout.armor === 'top_leather_jacket' ||
+    loadout.armor === 'top_red_hoodie' ||
+    loadout.armor === 'top_aviator_gold';
+
   const torso = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(0.52, 0.56, 0.32)), armorPrimaryMat);
   torso.position.y = 1.22;
   tagMesh(torso);
   bodyGroup.add(torso);
 
-  const chestPlate = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(0.44, 0.36, 0.36)), armorAccentMat);
-  chestPlate.position.set(0, 1.27, 0.01);
-  tagMesh(chestPlate);
-  bodyGroup.add(chestPlate);
+  if (loadout.armor === 'top_classic_tee') {
+    // Classic tee chest harness strap
+    const strapL = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(0.07, 0.54, 0.34)), gunDarkMat);
+    strapL.position.set(-0.14, 1.22, 0.01);
+    const strapR = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(0.07, 0.54, 0.34)), gunDarkMat);
+    strapR.position.set(0.14, 1.22, 0.01);
+    const badge = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(0.14, 0.1, 0.34)), armorAccentMat);
+    badge.position.set(0, 1.32, 0.01);
+    tagMesh(strapL);
+    tagMesh(strapR);
+    tagMesh(badge);
+    bodyGroup.add(strapL, strapR, badge);
+  } else if (loadout.armor === 'top_leather_jacket' || loadout.armor === 'top_aviator_gold') {
+    // Classic jacket collar + front zipper + undershirt V
+    const innerShirt = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(0.22, 0.44, 0.33)), armorAccentMat);
+    innerShirt.position.set(0, 1.22, 0.01);
+    const collar = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(0.46, 0.1, 0.34)), armorPrimaryMat);
+    collar.position.set(0, 1.5, -0.01);
+    const zipper = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(0.035, 0.5, 0.345)), visorMat);
+    zipper.position.set(0, 1.22, 0.01);
+    tagMesh(innerShirt);
+    tagMesh(collar);
+    tagMesh(zipper);
+    bodyGroup.add(innerShirt, collar, zipper);
+  } else if (loadout.armor === 'top_red_hoodie') {
+    // Classic hoodie pocket + hood collar
+    const pocket = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(0.36, 0.16, 0.34)), armorPrimaryMat);
+    pocket.position.set(0, 1.07, 0.015);
+    const hoodBack = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(0.38, 0.14, 0.2)), armorPrimaryMat);
+    hoodBack.position.set(0, 1.51, -0.14);
+    const stripe = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(0.42, 0.06, 0.34)), armorAccentMat);
+    stripe.position.set(0, 1.29, 0.01);
+    tagMesh(pocket);
+    tagMesh(hoodBack);
+    tagMesh(stripe);
+    bodyGroup.add(pocket, hoodBack, stripe);
+  } else {
+    const chestPlate = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(0.44, 0.36, 0.36)), armorAccentMat);
+    chestPlate.position.set(0, 1.27, 0.01);
+    tagMesh(chestPlate);
+    bodyGroup.add(chestPlate);
 
-  // Shoulder Pads
-  [-0.33, 0.33].forEach((xPos) => {
-    const pad = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(0.16, 0.18, 0.26)), armorAccentMat);
-    pad.position.set(xPos, 1.44, 0);
-    pad.rotation.z = xPos < 0 ? 0.18 : -0.18;
-    tagMesh(pad);
-    bodyGroup.add(pad);
-  });
+    // Shoulder Pads for tactical armors
+    [-0.33, 0.33].forEach((xPos) => {
+      const pad = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(0.16, 0.18, 0.26)), armorAccentMat);
+      pad.position.set(xPos, 1.44, 0);
+      pad.rotation.z = xPos < 0 ? 0.18 : -0.18;
+      tagMesh(pad);
+      bodyGroup.add(pad);
+    });
+  }
 
   // Backpack Module (varied by loadout)
-  const backpack = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(0.36, 0.42, 0.18)), packMat);
-  backpack.position.set(0, 1.25, -0.24);
+  const backpack = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(0.34, 0.4, 0.16)), packMat);
+  backpack.position.set(0, 1.24, -0.24);
   tagMesh(backpack);
   bodyGroup.add(backpack);
 
   if (loadout.backpack === 'pack_comms_antenna') {
     const antenna = new THREE.Mesh(trackGeo(new THREE.CylinderGeometry(0.012, 0.018, 0.55, 8)), packAccentMat);
-    antenna.position.set(0.12, 1.66, -0.25);
+    antenna.position.set(0.12, 1.64, -0.25);
     tagMesh(antenna);
     bodyGroup.add(antenna);
   } else if (loadout.backpack === 'pack_thruster') {
     [-0.1, 0.1].forEach((nx) => {
       const nozzle = new THREE.Mesh(trackGeo(new THREE.CylinderGeometry(0.045, 0.065, 0.16, 10)), packAccentMat);
-      nozzle.position.set(nx, 1.03, -0.28);
+      nozzle.position.set(nx, 1.02, -0.28);
       nozzle.rotation.x = 0.25;
       tagMesh(nozzle);
       bodyGroup.add(nozzle);
     });
   } else {
-    const strap = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(0.28, 0.08, 0.2)), packAccentMat);
-    strap.position.set(0, 1.25, -0.25);
+    const strap = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(0.28, 0.08, 0.18)), packAccentMat);
+    strap.position.set(0, 1.24, -0.25);
     tagMesh(strap);
     bodyGroup.add(strap);
   }
 
-  // Head & Helmet Group (marked isHead = true for real headshot hitboxes)
+  // Head & Classic Headgear / Helmet Group (marked isHead = true for real headshot hitboxes)
   const headGroup = new THREE.Group();
   headGroup.position.set(0, 1.66, 0);
 
-  const helmetBase = new THREE.Mesh(trackGeo(new THREE.SphereGeometry(0.21, 14, 12)), helmetMat);
-  helmetBase.scale.set(1, 1.05, 1.08);
-  tagMesh(helmetBase, true);
-  headGroup.add(helmetBase);
+  const isClassicHeadgear =
+    loadout.helmet === 'head_classic_cap' ||
+    loadout.helmet === 'head_black_bandana' ||
+    loadout.helmet === 'head_red_beret';
 
-  const visor = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(0.32, 0.11, 0.16)), visorMat);
-  visor.position.set(0, 0.02, 0.14);
-  tagMesh(visor, true);
-  headGroup.add(visor);
+  if (isClassicHeadgear) {
+    // Exposed head with hair + classic eyewear/cap/bandana/beret
+    const face = new THREE.Mesh(trackGeo(new THREE.SphereGeometry(0.19, 14, 12)), skinMat);
+    face.scale.set(0.95, 1.05, 1.0);
+    tagMesh(face, true);
+    headGroup.add(face);
 
-  if (loadout.helmet === 'helmet_titan_gold' || loadout.helmet === 'helmet_crimson_spec') {
-    const crest = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(0.07, 0.1, 0.34)), visorMat);
-    crest.position.set(0, 0.2, -0.01);
-    tagMesh(crest, true);
-    headGroup.add(crest);
+    const sunglasses = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(0.31, 0.075, 0.12)), gunDarkMat);
+    sunglasses.position.set(0, 0.03, 0.145);
+    tagMesh(sunglasses, true);
+    headGroup.add(sunglasses);
+
+    if (loadout.helmet === 'head_classic_cap') {
+      const capDome = new THREE.Mesh(trackGeo(new THREE.SphereGeometry(0.205, 14, 10, 0, Math.PI * 2, 0, Math.PI * 0.56)), helmetMat);
+      capDome.position.set(0, 0.02, 0);
+      const capBrim = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(0.28, 0.025, 0.22)), helmetMat);
+      capBrim.position.set(0, 0.06, 0.2);
+      capBrim.rotation.x = 0.14;
+      const capLogo = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(0.08, 0.05, 0.03)), visorMat);
+      capLogo.position.set(0, 0.12, 0.18);
+      tagMesh(capDome, true);
+      tagMesh(capBrim, true);
+      tagMesh(capLogo, true);
+      headGroup.add(capDome, capBrim, capLogo);
+    } else if (loadout.helmet === 'head_black_bandana') {
+      const hair = new THREE.Mesh(trackGeo(new THREE.SphereGeometry(0.2, 14, 10, 0, Math.PI * 2, 0, Math.PI * 0.55)), gunDarkMat);
+      hair.position.set(0, 0.02, -0.01);
+      const mask = new THREE.Mesh(trackGeo(new THREE.CylinderGeometry(0.185, 0.175, 0.15, 12)), helmetMat);
+      mask.position.set(0, -0.08, 0.025);
+      const skullPatch = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(0.12, 0.06, 0.04)), visorMat);
+      skullPatch.position.set(0, -0.08, 0.19);
+      tagMesh(hair, true);
+      tagMesh(mask, true);
+      tagMesh(skullPatch, true);
+      headGroup.add(hair, mask, skullPatch);
+    } else if (loadout.helmet === 'head_red_beret') {
+      const beret = new THREE.Mesh(trackGeo(new THREE.CylinderGeometry(0.21, 0.195, 0.11, 14)), helmetMat);
+      beret.position.set(-0.02, 0.14, 0);
+      beret.rotation.z = 0.2;
+      const crest = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(0.06, 0.06, 0.03)), visorMat);
+      crest.position.set(0.06, 0.15, 0.185);
+      tagMesh(beret, true);
+      tagMesh(crest, true);
+      headGroup.add(beret, crest);
+    }
+  } else {
+    const helmetBase = new THREE.Mesh(trackGeo(new THREE.SphereGeometry(0.21, 14, 12)), helmetMat);
+    helmetBase.scale.set(1, 1.05, 1.08);
+    tagMesh(helmetBase, true);
+    headGroup.add(helmetBase);
+
+    const visor = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(0.32, 0.11, 0.16)), visorMat);
+    visor.position.set(0, 0.02, 0.14);
+    tagMesh(visor, true);
+    headGroup.add(visor);
+
+    if (loadout.helmet === 'helmet_titan_gold' || loadout.helmet === 'helmet_crimson_spec') {
+      const crest = new THREE.Mesh(trackGeo(new THREE.BoxGeometry(0.07, 0.1, 0.34)), visorMat);
+      crest.position.set(0, 0.2, -0.01);
+      tagMesh(crest, true);
+      headGroup.add(crest);
+    }
   }
   bodyGroup.add(headGroup);
 
-  // Arms & Weapon
+  // Arms & Weapon (sleeves match classic jacket/hoodie or tactical undersuit)
+  const sleeveMat = isClassicTop && loadout.armor !== 'top_classic_tee' ? armorPrimaryMat : skinMat;
   const leftArm = new THREE.Group();
   leftArm.position.set(-0.33, 1.42, 0);
-  const leftArmMesh = new THREE.Mesh(trackGeo(new THREE.CapsuleGeometry(0.08, 0.38, 4, 8)), undersuitMat);
+  const leftArmMesh = new THREE.Mesh(trackGeo(new THREE.CapsuleGeometry(0.08, 0.38, 4, 8)), sleeveMat);
   leftArmMesh.position.set(0, -0.2, 0.14);
   leftArmMesh.rotation.x = -Math.PI / 3;
   tagMesh(leftArmMesh);
@@ -206,7 +325,7 @@ export function buildOperatorAvatar(
 
   const rightArm = new THREE.Group();
   rightArm.position.set(0.33, 1.42, 0);
-  const rightArmMesh = new THREE.Mesh(trackGeo(new THREE.CapsuleGeometry(0.08, 0.38, 4, 8)), undersuitMat);
+  const rightArmMesh = new THREE.Mesh(trackGeo(new THREE.CapsuleGeometry(0.08, 0.38, 4, 8)), sleeveMat);
   rightArmMesh.position.set(0, -0.18, 0.18);
   rightArmMesh.rotation.x = -Math.PI / 2.4;
   tagMesh(rightArmMesh);

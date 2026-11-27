@@ -3,14 +3,22 @@ import { Check, Maximize2, RotateCw, UserPlus, WifiOff, X } from 'lucide-react';
 import { soundEngine } from './audio/soundEngine';
 import { voiceChat, type VoiceStatus } from './audio/voiceChat';
 import { GameHUD } from './components/GameHUD';
-import { InstallDownloadModal } from './components/InstallDownloadModal';
 import { MainMenuHub, type HubTab } from './components/MainMenuHub';
 import { MatchSummaryModal } from './components/MatchSummaryModal';
 import { TitleScreen } from './components/TitleScreen';
-import { DAILY_REWARDS, SHOP_ITEMS, WEEKLY_CHALLENGES } from './data/catalog';
+import { VerifiedBadge } from './components/VerifiedBadge';
+import { DAILY_REWARDS, DEFAULT_OWNED_ITEMS, SHOP_ITEMS, WEEKLY_CHALLENGES } from './data/catalog';
 import { BattlePlayersEngine, type BotDifficulty, type HudSnapshot } from './game/ThreeEngine';
 import { mpClient, type RoomSummary, type ServerEvent } from './services/multiplayerClient';
-import { calcLevel, getTodayKey, loadProfile, saveProfile } from './services/profileStorage';
+import {
+  beaconProfileToServer,
+  calcLevel,
+  fetchProfileFromServer,
+  getTodayKey,
+  loadProfile,
+  saveProfile,
+  syncProfileToServer,
+} from './services/profileStorage';
 import type {
   ChatMessage,
   ClanInfo,
@@ -69,7 +77,6 @@ export default function App() {
   const [scoreboardOpen, setScoreboardOpen] = useState(false);
   const [hud, setHud] = useState<HudSnapshot>(INITIAL_HUD);
   const [matchSummary, setMatchSummary] = useState<MatchSummary | null>(null);
-  const [installModalOpen, setInstallModalOpen] = useState(false);
   const [webglLost, setWebglLost] = useState(false);
 
   // Internet Connectivity & Android Horizontal Fullscreen Detection
@@ -182,12 +189,64 @@ export default function App() {
     if (!engineRef.current) return;
     if (screen === 'playing') {
       engineRef.current.setViewMode('playing');
-    } else if (screen === 'hub' && hubTab === 'shop') {
+    } else if (screen === 'hub' && (hubTab === 'shop' || hubTab === 'wardrobe')) {
       engineRef.current.setViewMode('shop');
+    } else if (screen === 'hub') {
+      engineRef.current.setViewMode('lobby');
     } else {
       engineRef.current.setViewMode('title');
     }
   }, [screen, hubTab]);
+
+  // Persist full profile to server on changes and immediately on close/hide
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      void syncProfileToServer(profile);
+    }, 450);
+    return () => window.clearTimeout(timer);
+  }, [profile]);
+
+  useEffect(() => {
+    const cur = profileRef.current;
+    void fetchProfileFromServer(cur.id, cur.name).then((serverProfile) => {
+      if (!serverProfile) {
+        void syncProfileToServer(cur);
+        return;
+      }
+      // Restore server profile if local had no progression yet or server has more progress
+      const serverAhead =
+        serverProfile.xp > cur.xp ||
+        serverProfile.matches > cur.matches ||
+        serverProfile.ownedItems.length > cur.ownedItems.length;
+      if (serverAhead) {
+        const merged: PlayerProfile = {
+          ...serverProfile,
+          ownedItems: Array.from(new Set([...DEFAULT_OWNED_ITEMS, ...cur.ownedItems, ...serverProfile.ownedItems])),
+        };
+        saveProfile(merged);
+        setProfile(merged);
+      }
+    });
+
+    const handlePersistOnClose = () => {
+      beaconProfileToServer(profileRef.current);
+    };
+    const handleVisibility = () => {
+      if (document.visibilityState === 'hidden') {
+        beaconProfileToServer(profileRef.current);
+      }
+    };
+
+    window.addEventListener('beforeunload', handlePersistOnClose);
+    window.addEventListener('pagehide', handlePersistOnClose);
+    document.addEventListener('visibilitychange', handleVisibility);
+    return () => {
+      window.removeEventListener('beforeunload', handlePersistOnClose);
+      window.removeEventListener('pagehide', handlePersistOnClose);
+      document.removeEventListener('visibilitychange', handleVisibility);
+      beaconProfileToServer(profileRef.current);
+    };
+  }, []);
 
   const handleMatchEnd = useCallback(
     async (rawSummary: MatchSummary) => {
@@ -783,17 +842,23 @@ export default function App() {
           playerName={profile.name}
           isTouchDevice={isTouchDevice}
           onNameChange={(name) => updateProfile((p) => ({ ...p, name }))}
-          onEnterMenu={() => {
+          onEnterMenu={async () => {
             if (isTouchDevice) requestFullscreenLandscape();
+            if (profile.matches === 0 && profile.xp === 0) {
+              const restored = await fetchProfileFromServer(profile.id, profile.name);
+              if (restored && (restored.xp > 0 || restored.matches > 0 || restored.ownedItems.length > profile.ownedItems.length)) {
+                saveProfile(restored);
+                setProfile(restored);
+              }
+            }
             setScreen('hub');
           }}
           onQuickPlayBots={() => startSoloBots('veterano')}
           onRequestFullscreenLandscape={requestFullscreenLandscape}
-          onOpenInstallModal={() => setInstallModalOpen(true)}
         />
       )}
 
-      {/* Tactical Menu Hub */}
+      {/* Free-Fire-Style 3D Lobby & Hub */}
       {screen === 'hub' && (
         <MainMenuHub
           activeTab={hubTab}
@@ -826,7 +891,6 @@ export default function App() {
           onSendInvite={handleSendInvite}
           onAcceptInvite={handleAcceptInvite}
           onDismissInvite={handleDismissInvite}
-          onOpenInstallModal={() => setInstallModalOpen(true)}
         />
       )}
 
@@ -927,9 +991,12 @@ export default function App() {
               <UserPlus className="w-5 h-5 text-amber-400 shrink-0 mt-0.5" />
               <div className="min-w-0">
                 <div className="text-xs font-bold text-amber-300">Invitación a Sala de Juego</div>
-                <div className="text-sm font-semibold text-white truncate">
-                  {pendingInvites[0].fromClanTag ? `[${pendingInvites[0].fromClanTag}] ` : ''}
-                  {pendingInvites[0].fromName}
+                <div className="text-sm font-semibold text-white flex items-center gap-1 truncate">
+                  <span className="truncate">
+                    {pendingInvites[0].fromClanTag ? `[${pendingInvites[0].fromClanTag}] ` : ''}
+                    {pendingInvites[0].fromName}
+                  </span>
+                  <VerifiedBadge name={pendingInvites[0].fromName} size="xs" />
                 </div>
                 <div className="text-xs text-slate-300">
                   Sala <span className="font-mono-num font-bold text-amber-400">{pendingInvites[0].roomCode}</span>
@@ -961,9 +1028,6 @@ export default function App() {
           </div>
         </div>
       )}
-
-      {/* Install & Windows (.EXE) / Android (.APK) Kit Modal */}
-      <InstallDownloadModal open={installModalOpen} onClose={() => setInstallModalOpen(false)} />
 
       {/* Online-Required Internet Connection Guard */}
       {!browserOnline && (
