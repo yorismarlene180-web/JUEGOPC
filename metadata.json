@@ -1,0 +1,6 @@
+{
+  "name": "BATTLEPLAYERS",
+  "description": "Juego de disparos 3D táctico para PC Windows con modo offline contra bots, multijugador en tiempo real, chat de voz, tienda de avatar, clanes, desafíos y clasificación global.",
+  "requestFramePermissions": ["microphone"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
